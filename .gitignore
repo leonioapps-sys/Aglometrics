@@ -1,0 +1,40 @@
+# --- Python / build ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- IDE / SO ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Datos y modelos pesados (ajusta a tu caso) ---
+data/runtime/**          # salidas o logs que cambian
+data/**/*.parquet
+models/*.joblib.cache
+
+# Si quieres evitar subir TODOS los CSV pesados, descomenta:
+# data/*.csv
+
+# --- Archivos grandes comunes en tu proyecto ---
+models/*.pkl
+models/*.skops
+
+# --- Otros binarios frecuentes ---
+*.zip
+*.tar
+*.tar.gz
+*.7z
