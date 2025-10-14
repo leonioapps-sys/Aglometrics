@@ -271,6 +271,26 @@ def load_model_safely(path: str | Path):
             last_err = e  # intenta siguiente candidato
 
     raise RuntimeError(f"No se pudo cargar el modelo desde {base} (.skops/.pkl). Último error: {last_err}")
+@st.cache_resource(show_spinner=False)
+def load_all_models():
+    models_dir = Path(__file__).parent / "models"  # <-- carpeta recomendada
+    modelos, errores = {}, {}
+    for name in ("p80_model", "isg_rf"):  # usa los nombres REALES (sin extensión)
+        try:
+            modelos[name] = load_model_safely(models_dir / name)
+        except Exception as e:
+            errores[name] = str(e)
+    return modelos, errores
+
+MODELOS, MODELOS_ERR = load_all_models()
+
+# Diagnóstico visible (opcional)
+if MODELOS_ERR:
+    st.sidebar.error("Modelos con error:")
+    for k, v in MODELOS_ERR.items():
+        st.sidebar.write(f"• {k}: {v}")
+else:
+    st.sidebar.success("✅ Modelos cargados OK")
 
 
 # =================== CALCULOS ===================
@@ -333,24 +353,21 @@ solo_lectura = st.sidebar.toggle("🔒 Modo Solo Lectura", value=False,
 #    st.sidebar.success("Entradas limpiadas.")
 
 # Modelos (opcionales)
-model_isg = None; isg_feats=None; isg_meta={}
-model_p80 = None; p80_feats=None; p80_meta={}
+# Modelos (cargados en caché desde /models, .skops primero)
+model_isg  = None; isg_feats=None; isg_meta={}
+model_p80  = None; p80_feats=None; p80_meta={}
+
+if "isg_rf" in MODELOS:
+    model_isg, isg_feats, isg_meta = MODELOS["isg_rf"]
+if "p80_model" in MODELOS:
+    model_p80, p80_feats, p80_meta = MODELOS["p80_model"]
 
 col_m1, col_m2 = st.sidebar.columns(2)
 with col_m1:
-    if os.path.exists("isg_rf.pkl"):
-        try:
-            model_isg, isg_feats, isg_meta = load_model_safely("isg_rf.pkl")
-            st.success("Modelo ISG cargado")
-        except Exception as e:
-            st.warning(f"ISG no cargado: {e}")
+    st.success("Modelo ISG cargado") if model_isg else st.warning(f"ISG no cargado: {MODELOS_ERR.get('isg_rf','(archivo no encontrado)')}")
 with col_m2:
-    if os.path.exists("p80_model.pkl"):
-        try:
-            model_p80, p80_feats, p80_meta = load_model_safely("p80_model.pkl")
-            st.success("Modelo P80 cargado")
-        except Exception as e:
-            st.warning(f"P80 no cargado: {e}")
+    st.success("Modelo P80 cargado") if model_p80 else st.warning(f"P80 no cargado: {MODELOS_ERR.get('p80_model','(archivo no encontrado)')}")
+
 
 tabs = st.tabs(["Ingreso", "Historicos", "Termino Modulo", "Hist. Modulos", "Hist. Sulfatacion", "Simulador / Optimizacion"])
 
