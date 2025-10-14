@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # AgloMetrics — versión web con Streamlit
 
+# ======================= IMPORTS =======================
 import os, json, calendar, unicodedata, warnings
 from datetime import datetime, date
 from typing import Optional, Tuple, Any, List
@@ -8,15 +9,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 import altair as alt
 import joblib
 import sklearn
+import streamlit as st
 
-# ---------------------------- CONFIG STREAMLIT (debe ir primero) ----------------------------
+# ---------------------------- CONFIG STREAMLIT (DEBE SER EL PRIMER COMANDO DE STREAMLIT) ----------------------------
 st.set_page_config(page_title="AgloMetrics", layout="wide")
 
-# =================== CONSTANTES ===================
+# ======================= CONSTANTES =======================
 class Proc:
     OBJ_P80   = 80.0
     ISG_SET   = 50.0
@@ -26,7 +27,6 @@ class Proc:
     MRATIO    = 98.0/63.55 # kg H2SO4 / kg Cu
     TRES_7RPM = 0.80       # min a 7 rpm (ajustable)
 
-# Encabezados destino SIN TILDES (CSV)
 HIST_HEAD = [
     "Fecha","Ingeniero","Turno","Ciclo","Modulo",
     "TPH","Hum%","Agua_kg_t","Agua_m3_h","Acido_kg_t",
@@ -36,10 +36,8 @@ HIST_HEAD = [
     "Acido_m3_h_calc","P80_est%","ISG_est%",
     "Perd_kgCu_h","Perd_turno_kg","Perd_dia_kg"
 ]
-
 MOD_HEAD = ["FechaHora","Ciclo","Modulo","Ton_total_t","Acido_m3","Agua_m3",
             "P80_real%","Finos_100#_%","Perdida_Cu_texto","ISG_est_mod%","ISG_real%","Observaciones"]
-
 SULF_HEAD = ["FechaHora","Ciclo","Modulo","ISG_est%","ISG_real%","Fuente","Observaciones"]
 
 MONTHS = {"enero":1,"ene":1,"febrero":2,"feb":2,"marzo":3,"mar":3,"abril":4,"abr":4,
@@ -47,8 +45,9 @@ MONTHS = {"enero":1,"ene":1,"febrero":2,"feb":2,"marzo":3,"mar":3,"abril":4,"abr
           "septiembre":9,"sep":9,"octubre":10,"oct":10,"noviembre":11,"nov":11,
           "diciembre":12,"dic":12}
 
-# =================== UTILIDADES ===================
+# ======================= UTILIDADES =======================
 def export_dir() -> str:
+    # En Streamlit Cloud, el cwd es escribible durante la sesión
     return os.path.abspath(os.getcwd())
 
 def clamp(x,a,b): return max(a,min(b,x))
@@ -98,8 +97,6 @@ def csv_datetime(s: str):
         return datetime.strptime(s,"%d/%m/%Y")
     except: return None
 
-def days_in_month(y,m): return calendar.monthrange(y,m)[1]
-
 def strip_accents(txt: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
 
@@ -134,8 +131,7 @@ def normalize_hist_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[HIST_HEAD]
 
 def normalize_mod_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=MOD_HEAD)
+    if df.empty: return pd.DataFrame(columns=MOD_HEAD)
     mapping = {
         "fechahora":"FechaHora","ciclo":"Ciclo","modulo":"Modulo","módulo":"Modulo",
         "ton_total_t":"Ton_total_t","acido_m3":"Acido_m3","agua_m3":"Agua_m3",
@@ -153,8 +149,7 @@ def normalize_mod_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[MOD_HEAD]
 
 def normalize_sulf_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=SULF_HEAD)
+    if df.empty: return pd.DataFrame(columns=SULF_HEAD)
     mapping = {"fechahora":"FechaHora","ciclo":"Ciclo","modulo":"Modulo",
                "isg_est%":"ISG_est%","isg_real%":"ISG_real%","fuente":"Fuente","observaciones":"Observaciones"}
     new={}
@@ -167,7 +162,7 @@ def normalize_sulf_columns(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns: df[c] = np.nan
     return df[SULF_HEAD]
 
-# =================== ARCHIVOS ===================
+# ======================= ARCHIVOS CSV =======================
 def csv_paths():
     base = export_dir()
     return (os.path.join(base,"humedades.csv"),
@@ -202,7 +197,7 @@ def read_csv_df(path: str, headers_expected: List[str]|None=None, kind: str="") 
 def write_csv_df(path: str, df: pd.DataFrame):
     df.to_csv(path, index=False, encoding="utf-8", sep=',')
 
-# =================== MODELOS (robustos) ===================
+# ======================= MODELOS =======================
 try:
     import skops.io as skio
     _HAS_SKOPS = True
@@ -214,9 +209,11 @@ def _safe_version_warning(meta: dict):
         trained = meta.get("sklearn_trained")
         ver_run = sklearn.__version__
         if trained and trained != ver_run:
-            msg = (f"Modelo entrenado con scikit-learn {trained} y ejecutando en {ver_run}. "
-                   f"Si notas resultados raros, re-exporta a .skops o alinea versiones.")
-            warnings.warn(msg, category=UserWarning)
+            warnings.warn(
+                f"Modelo entrenado con scikit-learn {trained} y ejecutando en {ver_run}. "
+                f"Si notas diferencias, re-exporta a .skops o alinea versiones.",
+                category=UserWarning
+            )
     except Exception:
         pass
 
@@ -262,12 +259,13 @@ def load_all_models():
     models_dir = base / "models"
 
     def find_model(base_name: str) -> Path | None:
-        for p in [
+        checks = [
             models_dir / f"{base_name}.skops",
             models_dir / f"{base_name}.pkl",
             base / f"{base_name}.skops",
             base / f"{base_name}.pkl",
-        ]:
+        ]
+        for p in checks:
             if p.exists():
                 return p
         return None
@@ -276,7 +274,7 @@ def load_all_models():
     for name in ("p80_model", "isg_rf"):
         p = find_model(name)
         if not p:
-            errores[name] = f"No se encontró {name}.skops/.pkl en /models ni en la raíz."
+            errores[name] = f"No se encontró {name}.skops/.pkl en ./models ni en la raíz."
             continue
         try:
             modelos[name] = load_model_safely(p)
@@ -286,7 +284,7 @@ def load_all_models():
 
 MODELOS, MODELOS_ERR = load_all_models()
 
-# =================== CALCULOS ===================
+# ======================= CALCULOS =======================
 def residence_time_min(rpm: float) -> float:
     rpm=max(0.1,rpm)
     return Proc.TRES_7RPM * (7.0 / rpm)
@@ -319,7 +317,7 @@ def finos_flag(f):
     if f is None: return "—"
     return "Rojo" if f>30 else ("Ambar" if f>=25 else "OK")
 
-# =================== SIDEBAR ===================
+# ======================= SIDEBAR =======================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
     st.sidebar.image("AgloMetrics_P80_icon_512.png", width=240)
 
@@ -328,7 +326,7 @@ st.sidebar.subheader("Optimizacion aglomerado con ML")
 solo_lectura = st.sidebar.toggle("🔒 Modo Solo Lectura", value=False,
                                  help="Bloquea escritura en CSV y ediciones.")
 
-# Estado de modelos (se muestra después del set_page_config)
+# Estado de modelos sin usar expresiones inline (evita TypeError raros)
 model_isg  = None; isg_feats=None; isg_meta={}
 model_p80  = None; p80_feats=None; p80_meta={}
 if "isg_rf" in MODELOS:
@@ -338,15 +336,29 @@ if "p80_model" in MODELOS:
 
 col_m1, col_m2 = st.sidebar.columns(2)
 with col_m1:
-    st.success("Modelo ISG cargado") if model_isg else st.warning(f"ISG no cargado: {MODELOS_ERR.get('isg_rf','(archivo no encontrado)')}")
+    if model_isg:
+        st.success("Modelo ISG cargado")
+    else:
+        st.warning("ISG no cargado")
 with col_m2:
-    st.success("Modelo P80 cargado") if model_p80 else st.warning(f"P80 no cargado: {MODELOS_ERR.get('p80_model','(archivo no encontrado)')}")
+    if model_p80:
+        st.success("Modelo P80 cargado")
+    else:
+        st.warning("P80 no cargado")
 
-# =================== RUTAS CSV ===================
+if MODELOS_ERR:
+    st.sidebar.markdown("**Detalles de modelos no cargados:**")
+    for k,v in MODELOS_ERR.items():
+        st.sidebar.markdown(f"- **{k}**: {v}")
+
+# ======================= RUTAS CSV =======================
 csv_hist, csv_mod, csv_sulf, last_form = csv_paths()
 
-# =================== TABS ===================
-tabs = st.tabs(["Ingreso", "Historicos", "Termino Modulo", "Hist. Modulos", "Hist. Sulfatacion", "Simulador / Optimizacion"])
+# ======================= TABS =======================
+tabs = st.tabs([
+    "Ingreso", "Historicos", "Termino Modulo",
+    "Hist. Modulos", "Hist. Sulfatacion", "Simulador / Optimizacion"
+])
 
 # ------------------------------------------------ Ingreso
 with tabs[0]:
@@ -380,7 +392,7 @@ with tabs[0]:
 
     c1,c2,c3,c4 = st.columns(4)
     carb     = c1.number_input("CO3 (%)", min_value=0.0, value=to_float(defaults.get("carb",0)), key="ing_carb")
-    nitr     = c2.number_input("NO3 (%)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
+    nitr     = c2.number_input("NO3 (g/L)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
     can_mina = c3.number_input("CAN mina (kg/t)", min_value=0.0, value=to_float(defaults.get("can_mina",0)), key="ing_can")
     origen   = c4.text_input("Origen de alimentacion", value=defaults.get("origen",""), key="ing_origen")
 
@@ -405,7 +417,7 @@ with tabs[0]:
         for k in keys: st.session_state.pop(k, None)
         st.rerun()
 
-    # ---------- Calculos ----------
+    # ---------- CÁLCULOS ----------
     if calcular or guardar:
         errs = []
         if tph<=0: errs.append("TPH debe ser > 0 para calculos completos.")
@@ -422,7 +434,6 @@ with tabs[0]:
         perd_turno = kg_cu_h*(turno_t/max(tph,1e-9)) if (turno_t>0 and tph>0) else 0.0
         perd_dia = kg_cu_h*24.0
         st.write(f"Perdida turno: {pretty_kg(perd_turno)} kg Cu | Perdida dia: {pretty_kg(perd_dia)} kg Cu")
-
         st.write(f"Finos #100: {finos:.1f}% → **{finos_flag(finos)}**")
 
         delta = acid_kgt - can_mina
@@ -522,7 +533,7 @@ with tabs[0]:
                 dfs.loc[len(dfs)] = [fecha_hora, ciclo, modulo, f"{isg_est:.1f}", "", ("Modelo ML" if model_isg else "Formula"), ""]
             write_csv_df(csv_sulf, dfs)
 
-            # último form
+            # último form (comodidad de UI)
             data = dict(ingeniero=ingeniero, turno=turno, ciclo=ciclo, modulo=modulo,
                         tph=str(tph), hum=str(hum), agua_kgt=str(agua_kgt), agua_m3h=str(agua_m3h),
                         acid_kgt=str(acid_kgt), cut=str(cut), cus=str(cus), carb=str(carb), nitr=str(nitr),
@@ -537,7 +548,8 @@ with tabs[0]:
 
     if exportar:
         df = read_csv_df(csv_hist, HIST_HEAD, kind="hist")
-        if df.empty: st.warning("No hay registros para exportar.")
+        if df.empty:
+            st.warning("No hay registros para exportar.")
         else:
             path = export_rows_to_excel("historicos_humedades", list(df.columns), df.values.tolist())
             open_path_hint(path)
@@ -584,44 +596,49 @@ with tabs[1]:
 
         st.caption(f"{len(dfv)} registro(s)")
 
-        edited = st.data_editor(dfv, num_rows="dynamic" if not solo_lectura else "fixed", disabled=solo_lectura)
-        c1,c2,c3 = st.columns([1,1,1])
-        exp_pdf = c1.button("Exportar PDF", key="hist_exp_pdf")
-        exp_xls = c2.button("Exportar Excel", key="hist_exp_xls")
-        aplicar = c3.button("Aplicar cambios al CSV", disabled=solo_lectura, key="hist_apply")
+        # Asegurar DataFrame antes de pasar al editor (evita errores de conversión)
+        if not isinstance(dfv, pd.DataFrame):
+            st.error("Vista de datos no válida.")
+        else:
+            edited = st.data_editor(dfv, num_rows="dynamic" if not solo_lectura else "fixed", disabled=solo_lectura, key="hist_editor")
 
-        if exp_xls:
-            path = export_rows_to_excel("historicos_humedades_vista", list(edited.columns), edited.values.tolist())
-            open_path_hint(path)
+            c1,c2,c3 = st.columns([1,1,1])
+            exp_pdf = c1.button("Exportar PDF", key="hist_exp_pdf")
+            exp_xls = c2.button("Exportar Excel", key="hist_exp_xls")
+            aplicar = c3.button("Aplicar cambios al CSV", disabled=solo_lectura, key="hist_apply")
 
-        if exp_pdf:
-            try:
-                from reportlab.lib.pagesizes import landscape, A4
-                from reportlab.pdfgen import canvas as pdf
-                out=os.path.join(export_dir(), f"historicos_{_ts()}.pdf")
-                c=pdf.Canvas(out,pagesize=landscape(A4)); w,h=landscape(A4); y=h-40
-                c.setFont("Helvetica-Bold",16); c.drawString(40,y,"AgloMetrics - Historial")
-                y-=24
-                c.setFont("Helvetica",10); c.drawString(40,y,f"Filas: {len(edited)}"); y-=16
-                headers=list(edited.columns)
-                c.setFont("Helvetica-Bold",8); c.drawString(40,y," | ".join(map(str,headers))); y-=12
-                c.setFont("Helvetica",7)
-                for _,r in edited.iterrows():
-                    c.drawString(40,y," | ".join(map(lambda x: str(x), r.values))); y-=11
-                    if y<60:
-                        c.showPage(); y=h-40
-                        c.setFont("Helvetica-Bold",8); c.drawString(40,y," | ".join(map(str,headers))); y-=12
-                        c.setFont("Helvetica",7)
-                c.showPage(); c.save()
-                open_path_hint(out)
-            except Exception as e:
-                st.error(f"Error PDF: {e}")
+            if exp_xls:
+                path = export_rows_to_excel("historicos_humedades_vista", list(edited.columns), edited.values.tolist())
+                open_path_hint(path)
 
-        if aplicar and not solo_lectura:
-            base = df.copy()
-            base.loc[edited.index, :] = edited
-            write_csv_df(csv_hist, base)
-            st.success("Cambios aplicados.")
+            if exp_pdf:
+                try:
+                    from reportlab.lib.pagesizes import landscape, A4
+                    from reportlab.pdfgen import canvas as pdf
+                    out=os.path.join(export_dir(), f"historicos_{_ts()}.pdf")
+                    c=pdf.Canvas(out,pagesize=landscape(A4)); w,h=landscape(A4); y=h-40
+                    c.setFont("Helvetica-Bold",16); c.drawString(40,y,"AgloMetrics - Historial")
+                    y-=24
+                    c.setFont("Helvetica",10); c.drawString(40,y,f"Filas: {len(edited)}"); y-=16
+                    headers=list(edited.columns)
+                    c.setFont("Helvetica-Bold",8); c.drawString(40,y," | ".join(map(str,headers))); y-=12
+                    c.setFont("Helvetica",7)
+                    for _,r in edited.iterrows():
+                        c.drawString(40,y," | ".join(map(lambda x: str(x), r.values))); y-=11
+                        if y<60:
+                            c.showPage(); y=h-40
+                            c.setFont("Helvetica-Bold",8); c.drawString(40,y," | ".join(map(str,headers))); y-=12
+                            c.setFont("Helvetica",7)
+                    c.showPage(); c.save()
+                    open_path_hint(out)
+                except Exception as e:
+                    st.error(f"Error PDF (opcional): {e}. Instala reportlab si lo necesitas.")
+
+            if aplicar and not solo_lectura:
+                base = df.copy()
+                base.loc[edited.index, :] = edited
+                write_csv_df(csv_hist, base)
+                st.success("Cambios aplicados.")
 
         # --------- GRAFICOS MENSUALES ----------
         st.markdown("### Series temporales (vista mensual)")
@@ -745,18 +762,21 @@ with tabs[3]:
             dhas = csv_datetime(f_hasta)
             if dhas: dfm = dfm[dfm["FechaHora"].apply(lambda x: (csv_datetime(str(x)) or datetime(9999,1,1))<=dhas)]
 
-        edited = st.data_editor(dfm, num_rows="dynamic" if not solo_lectura else "fixed", disabled=solo_lectura)
-        c1,c2 = st.columns(2)
-        b_exp = c1.button("Exportar Excel", key="hm_export")
-        b_apply = c2.button("Aplicar cambios al CSV", disabled=solo_lectura, key="hm_apply")
+        if not isinstance(dfm, pd.DataFrame):
+            st.error("Datos de módulos no válidos.")
+        else:
+            edited = st.data_editor(dfm, num_rows="dynamic" if not solo_lectura else "fixed", disabled=solo_lectura, key="hm_editor")
+            c1,c2 = st.columns(2)
+            b_exp = c1.button("Exportar Excel", key="hm_export")
+            b_apply = c2.button("Aplicar cambios al CSV", disabled=solo_lectura, key="hm_apply")
 
-        if b_exp:
-            path = export_rows_to_excel("historicos_modulos", list(edited.columns), edited.values.tolist())
-            open_path_hint(path)
+            if b_exp:
+                path = export_rows_to_excel("historicos_modulos", list(edited.columns), edited.values.tolist())
+                open_path_hint(path)
 
-        if b_apply and not solo_lectura:
-            write_csv_df(csv_mod, edited)
-            st.success("Cambios aplicados.")
+            if b_apply and not solo_lectura:
+                write_csv_df(csv_mod, edited)
+                st.success("Cambios aplicados.")
 
 # ----------------------------------------------- Hist. Sulfatacion
 with tabs[4]:
@@ -865,7 +885,8 @@ with tabs[4]:
                     y=alt.Y("target:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100]))
                 )
                 chart = alt.Chart(plot_df).mark_circle(size=90).encode(
-                    x=alt.X("Modulo:N", title="Modulo", sort="ascending", axis=alt.Axis(labelAngle=0)),
+                    x=alt.X("Modulo:N", title="Modulo", sort="ascending",
+                            axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("ISG:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100])),
                     color=alt.Color("Serie:N", title="Serie", scale=alt.Scale(scheme="tableau10")),
                     tooltip=["Modulo","Serie","ISG"]
@@ -895,7 +916,7 @@ with tabs[5]:
 
     c1,c2,c3 = st.columns(3)
     sim_co3   = c1.number_input("CO3 (%)", min_value=0.0, value=0.54, key="sim_co3")
-    sim_no3   = c2.number_input("NO3 (%)", min_value=0.0, value=0.09, key="sim_no3")
+    sim_no3   = c2.number_input("NO3 (g/L)", min_value=0.0, value=0.09, key="sim_no3")
     sim_finos = c3.number_input("Finos #100 (%)", min_value=0.0, max_value=100.0, value=11.0, key="sim_finos")
 
     with st.expander("Parametros quimicos"):
@@ -943,3 +964,4 @@ with tabs[5]:
         vol_kgph = sim_acid_m3h_eff*sim_ral if (sim_acid_m3h_eff>0 and sim_ral>0) else 0.0
         req_kgt = max(0.0, (need_target + penalty_kgt*sim_tph - vol_kgph)/max(sim_tph,1e-9))
         st.success(f"Para ISG≈{Proc.ISG_SET:.0f}% el piso recomendado es **{req_kgt:.2f} kg/t** (con RAL y penalizaciones actuales).")
+
