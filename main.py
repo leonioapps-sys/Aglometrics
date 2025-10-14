@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
-# AgloMetrics — version web local con Streamlit
-# Pestañas: Ingreso, Historicos, Termino Modulo, Hist. Modulos, Hist. Sulfatacion, Simulador/Opt
+# AgloMetrics — versión web con Streamlit
 
-import os, json, warnings, calendar
+import os, json, calendar, unicodedata, warnings
 from datetime import datetime, date
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Any, List
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
 import joblib
 import sklearn
-#from sklearn.exceptions import InconsistentVersionWarning
-import unicodedata
+
+# ---------------------------- CONFIG STREAMLIT (debe ir primero) ----------------------------
+st.set_page_config(page_title="AgloMetrics", layout="wide")
 
 # =================== CONSTANTES ===================
 class Proc:
@@ -47,7 +48,9 @@ MONTHS = {"enero":1,"ene":1,"febrero":2,"feb":2,"marzo":3,"mar":3,"abril":4,"abr
           "diciembre":12,"dic":12}
 
 # =================== UTILIDADES ===================
-def export_dir(): return os.path.abspath(os.getcwd())
+def export_dir() -> str:
+    return os.path.abspath(os.getcwd())
+
 def clamp(x,a,b): return max(a,min(b,x))
 def nonneg(x): return max(0.0,x)
 
@@ -101,10 +104,8 @@ def strip_accents(txt: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
 
 def normalize_hist_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Mapea columnas antiguas (con tildes / otros nombres) a HIST_HEAD."""
     if df.empty: 
         return pd.DataFrame(columns=HIST_HEAD)
-    # mapa flexible por nombre en minúsculas sin tildes
     mapping = {
         "fecha":"Fecha","ingeniero":"Ingeniero","turno":"Turno","ciclo":"Ciclo",
         "modulo":"Modulo","módulo":"Modulo","módulo ":"Modulo",
@@ -128,7 +129,6 @@ def normalize_hist_columns(df: pd.DataFrame) -> pd.DataFrame:
         tgt = mapping.get(key)
         if tgt: new[c] = tgt
     df = df.rename(columns=new)
-    # asegurar todas
     for c in HIST_HEAD:
         if c not in df.columns: df[c] = np.nan
     return df[HIST_HEAD]
@@ -155,9 +155,8 @@ def normalize_mod_columns(df: pd.DataFrame) -> pd.DataFrame:
 def normalize_sulf_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=SULF_HEAD)
-    mapping = {
-        "fechahora":"FechaHora","ciclo":"Ciclo","modulo":"Modulo","isg_est%":"ISG_est%","isg_real%":"ISG_real%","fuente":"Fuente","observaciones":"Observaciones"
-    }
+    mapping = {"fechahora":"FechaHora","ciclo":"Ciclo","modulo":"Modulo",
+               "isg_est%":"ISG_est%","isg_real%":"ISG_real%","fuente":"Fuente","observaciones":"Observaciones"}
     new={}
     for c in df.columns:
         key = strip_accents(str(c)).lower().strip()
@@ -187,14 +186,12 @@ def read_csv_df(path: str, headers_expected: List[str]|None=None, kind: str="") 
         df = pd.read_csv(path, encoding="utf-8", sep=',', header=0, engine="python")
     except Exception:
         return pd.DataFrame(columns=headers_expected or [])
-    # normalizar columnas por tipo
     if kind=="hist":
         df = normalize_hist_columns(df)
     elif kind=="mod":
         df = normalize_mod_columns(df)
     elif kind=="sulf":
         df = normalize_sulf_columns(df)
-    # asegurar orden/ausentes
     if headers_expected:
         for col in headers_expected:
             if col not in df.columns:
@@ -205,12 +202,7 @@ def read_csv_df(path: str, headers_expected: List[str]|None=None, kind: str="") 
 def write_csv_df(path: str, df: pd.DataFrame):
     df.to_csv(path, index=False, encoding="utf-8", sep=',')
 
-# =================== MODELOS ===================
 # =================== MODELOS (robustos) ===================
-from pathlib import Path
-import warnings, joblib, sklearn
-
-# Intentar usar skops (más portable que .pkl)
 try:
     import skops.io as skio
     _HAS_SKOPS = True
@@ -218,19 +210,17 @@ except Exception:
     _HAS_SKOPS = False
 
 def _safe_version_warning(meta: dict):
-    """Emite un warning si hay mismatch de scikit-learn, sin romper la carga."""
     try:
         trained = meta.get("sklearn_trained")
         ver_run = sklearn.__version__
         if trained and trained != ver_run:
             msg = (f"Modelo entrenado con scikit-learn {trained} y ejecutando en {ver_run}. "
                    f"Si notas resultados raros, re-exporta a .skops o alinea versiones.")
-            warnings.warn(msg, category=UserWarning)  # <- evita TypeError del InconsistentVersionWarning
+            warnings.warn(msg, category=UserWarning)
     except Exception:
         pass
 
 def _unpack_model_object(obj):
-    """Soporta dict envolviendo {'model','features','target','metrics','sklearn','trained_at'} o el modelo directo."""
     if isinstance(obj, dict):
         model = obj.get("model", obj)
         feats = obj.get("features") or []
@@ -246,14 +236,8 @@ def _unpack_model_object(obj):
     return model, feats, meta
 
 def load_model_safely(path: str | Path):
-    """
-    Carga un modelo desde .skops (preferido) o .pkl.
-    Acepta ruta con o sin extensión (p.ej. 'models/p80_model').
-    Retorna: (model, features:list, meta:dict)
-    """
     base = Path(path)
     candidates = [base] if base.suffix else [base.with_suffix(".skops"), base.with_suffix(".pkl")]
-
     last_err = None
     for p in candidates:
         if not p.exists():
@@ -268,30 +252,39 @@ def load_model_safely(path: str | Path):
                 obj = joblib.load(p)
             return _unpack_model_object(obj)
         except Exception as e:
-            last_err = e  # intenta siguiente candidato
-
+            last_err = e
     raise RuntimeError(f"No se pudo cargar el modelo desde {base} (.skops/.pkl). Último error: {last_err}")
+
 @st.cache_resource(show_spinner=False)
 def load_all_models():
-    models_dir = Path(__file__).parent / "models"  # <-- carpeta recomendada
+    """Busca p80_model e isg_rf en /models y en la raíz; prioriza .skops sobre .pkl."""
+    base = Path(__file__).parent
+    models_dir = base / "models"
+
+    def find_model(base_name: str) -> Path | None:
+        for p in [
+            models_dir / f"{base_name}.skops",
+            models_dir / f"{base_name}.pkl",
+            base / f"{base_name}.skops",
+            base / f"{base_name}.pkl",
+        ]:
+            if p.exists():
+                return p
+        return None
+
     modelos, errores = {}, {}
-    for name in ("p80_model", "isg_rf"):  # usa los nombres REALES (sin extensión)
+    for name in ("p80_model", "isg_rf"):
+        p = find_model(name)
+        if not p:
+            errores[name] = f"No se encontró {name}.skops/.pkl en /models ni en la raíz."
+            continue
         try:
-            modelos[name] = load_model_safely(models_dir / name)
+            modelos[name] = load_model_safely(p)
         except Exception as e:
             errores[name] = str(e)
     return modelos, errores
 
 MODELOS, MODELOS_ERR = load_all_models()
-
-# Diagnóstico visible (opcional)
-if MODELOS_ERR:
-    st.sidebar.error("Modelos con error:")
-    for k, v in MODELOS_ERR.items():
-        st.sidebar.write(f"• {k}: {v}")
-else:
-    st.sidebar.success("✅ Modelos cargados OK")
-
 
 # =================== CALCULOS ===================
 def residence_time_min(rpm: float) -> float:
@@ -326,12 +319,7 @@ def finos_flag(f):
     if f is None: return "—"
     return "Rojo" if f>30 else ("Ambar" if f>=25 else "OK")
 
-# =================== APP ===================
-st.set_page_config(page_title="AgloMetrics", layout="wide")
-
-csv_hist, csv_mod, csv_sulf, last_form = csv_paths()
-
-# Sidebar
+# =================== SIDEBAR ===================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
     st.sidebar.image("AgloMetrics_P80_icon_512.png", width=240)
 
@@ -340,23 +328,9 @@ st.sidebar.subheader("Optimizacion aglomerado con ML")
 solo_lectura = st.sidebar.toggle("🔒 Modo Solo Lectura", value=False,
                                  help="Bloquea escritura en CSV y ediciones.")
 
-#col_sb1,col_sb2 = st.sidebar.columns(1)
-#if col_sb1.button("Cargar ultimo", use_container_width=True):
-#    if os.path.exists(last_form):
-#        st.session_state["load_defaults"] = True
-#        st.sidebar.success("Ultimo formulario listo para cargar.")
-#    else:
-#        st.sidebar.info("No hay formulario guardado.")
-#if col_sb2.button("Limpiar todo", use_container_width=True):
-#    keys = [k for k in st.session_state.keys() if k.startswith(("ing_","tm_","hist_","hm_","sim_"))]
-#    for k in keys: st.session_state.pop(k, None)
-#    st.sidebar.success("Entradas limpiadas.")
-
-# Modelos (opcionales)
-# Modelos (cargados en caché desde /models, .skops primero)
+# Estado de modelos (se muestra después del set_page_config)
 model_isg  = None; isg_feats=None; isg_meta={}
 model_p80  = None; p80_feats=None; p80_meta={}
-
 if "isg_rf" in MODELOS:
     model_isg, isg_feats, isg_meta = MODELOS["isg_rf"]
 if "p80_model" in MODELOS:
@@ -368,7 +342,10 @@ with col_m1:
 with col_m2:
     st.success("Modelo P80 cargado") if model_p80 else st.warning(f"P80 no cargado: {MODELOS_ERR.get('p80_model','(archivo no encontrado)')}")
 
+# =================== RUTAS CSV ===================
+csv_hist, csv_mod, csv_sulf, last_form = csv_paths()
 
+# =================== TABS ===================
 tabs = st.tabs(["Ingreso", "Historicos", "Termino Modulo", "Hist. Modulos", "Hist. Sulfatacion", "Simulador / Optimizacion"])
 
 # ------------------------------------------------ Ingreso
@@ -403,7 +380,7 @@ with tabs[0]:
 
     c1,c2,c3,c4 = st.columns(4)
     carb     = c1.number_input("CO3 (%)", min_value=0.0, value=to_float(defaults.get("carb",0)), key="ing_carb")
-    nitr     = c2.number_input("NO3 (g/L)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
+    nitr     = c2.number_input("NO3 (%)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
     can_mina = c3.number_input("CAN mina (kg/t)", min_value=0.0, value=to_float(defaults.get("can_mina",0)), key="ing_can")
     origen   = c4.text_input("Origen de alimentacion", value=defaults.get("origen",""), key="ing_origen")
 
@@ -426,7 +403,7 @@ with tabs[0]:
     if limpiar:
         keys = [k for k in st.session_state.keys() if k.startswith("ing_")]
         for k in keys: st.session_state.pop(k, None)
-        st.experimental_rerun()
+        st.rerun()
 
     # ---------- Calculos ----------
     if calcular or guardar:
@@ -495,7 +472,6 @@ with tabs[0]:
         # ---------- Guardar ----------
         if guardar and not solo_lectura:
             ensure_headers(csv_hist, HIST_HEAD)
-            # P80 estimado (opcional)
             p80_est = Proc.OBJ_P80
             if model_p80 is not None:
                 try:
@@ -507,7 +483,6 @@ with tabs[0]:
                 except Exception:
                     p80_est = Proc.OBJ_P80
 
-            # 1) Historico de humedades
             row = {
                 "Fecha": fecha_ui,
                 "Ingeniero": ingeniero, "Turno": turno, "Ciclo": ciclo, "Modulo": modulo,
@@ -527,11 +502,9 @@ with tabs[0]:
             df.loc[len(df)] = [row[c] for c in HIST_HEAD]
             write_csv_df(csv_hist, df)
 
-            # 2) Sulfatacion (estimado) con sincronizacion anidada
+            # Sulfatación estimada (sincroniza por ciclo si no hay real)
             ensure_headers(csv_sulf, SULF_HEAD)
             dfs = read_csv_df(csv_sulf, SULF_HEAD, kind="sulf")
-
-            # buscar ultimo registro del mismo ciclo SIN ISG_real para actualizar en lugar de duplicar
             idx_to_update = None
             if not dfs.empty:
                 same_ciclo = dfs["Ciclo"].astype(str).str.strip() == str(ciclo).strip()
@@ -539,20 +512,17 @@ with tabs[0]:
                 cand = dfs[same_ciclo & no_real]
                 if not cand.empty:
                     idx_to_update = cand.index[-1]
-
             fecha_hora = f"{fecha_ui} {datetime.now().strftime('%H:%M')}"
             if idx_to_update is not None:
-                # actualiza datos anidados (FechaHora, Modulo, ISG_est%, Fuente)
                 dfs.loc[idx_to_update, "FechaHora"] = fecha_hora
                 dfs.loc[idx_to_update, "Modulo"]    = str(modulo)
                 dfs.loc[idx_to_update, "ISG_est%"]  = f"{isg_est:.1f}"
-                dfs.loc[idx_to_update, "Fuente"]    = fuente
+                dfs.loc[idx_to_update, "Fuente"]    = "Modelo ML" if model_isg else "Formula"
             else:
-                # inserta nuevo
-                dfs.loc[len(dfs)] = [fecha_hora, ciclo, modulo, f"{isg_est:.1f}", "", fuente, ""]
+                dfs.loc[len(dfs)] = [fecha_hora, ciclo, modulo, f"{isg_est:.1f}", "", ("Modelo ML" if model_isg else "Formula"), ""]
             write_csv_df(csv_sulf, dfs)
 
-            # 3) persistir ultimo form (para comodidad UI)
+            # último form
             data = dict(ingeniero=ingeniero, turno=turno, ciclo=ciclo, modulo=modulo,
                         tph=str(tph), hum=str(hum), agua_kgt=str(agua_kgt), agua_m3h=str(agua_m3h),
                         acid_kgt=str(acid_kgt), cut=str(cut), cus=str(cus), carb=str(carb), nitr=str(nitr),
@@ -563,7 +533,7 @@ with tabs[0]:
             except:
                 pass
 
-            st.success("Registro guardado (historico + sulfatacion estimada).")
+            st.success("Registro guardado (histórico + sulfatación estimada).")
 
     if exportar:
         df = read_csv_df(csv_hist, HIST_HEAD, kind="hist")
@@ -653,7 +623,7 @@ with tabs[1]:
             write_csv_df(csv_hist, base)
             st.success("Cambios aplicados.")
 
-        # --------- GRAFICOS MENSUALES (ISG y P80) ----------
+        # --------- GRAFICOS MENSUALES ----------
         st.markdown("### Series temporales (vista mensual)")
         gdf = df.copy()
         gdf["__dt"] = gdf["Fecha"].apply(lambda x: csv_datetime(str(x)))
@@ -788,21 +758,18 @@ with tabs[3]:
             write_csv_df(csv_mod, edited)
             st.success("Cambios aplicados.")
 
-# ----------------------------------------------- Hist. Sulfatacion (EXCLUSIVO)
-
+# ----------------------------------------------- Hist. Sulfatacion
 with tabs[4]:
     st.subheader("Historico — Sulfatacion (estimada vs real)")
     ensure_headers(csv_sulf, SULF_HEAD)
     dfs = read_csv_df(csv_sulf, SULF_HEAD, kind="sulf").copy()
 
-    # ---- Normaliza tipos para que el editor no falle ----
     text_cols = ["FechaHora", "Ciclo", "Modulo", "Fuente", "Observaciones"]
     num_cols  = ["ISG_est%", "ISG_real%"]
 
     for c in text_cols:
         if c in dfs.columns:
             dfs[c] = dfs[c].astype(str).replace("nan", "").fillna("")
-
     for c in num_cols:
         if c in dfs.columns:
             dfs[c] = pd.to_numeric(dfs[c], errors="coerce")
@@ -810,7 +777,6 @@ with tabs[4]:
     if dfs.empty:
         st.info("Sin registros.")
     else:
-        # Solo ISG_real% y Observaciones editables
         col_cfg = {
             "FechaHora":   st.column_config.TextColumn("FechaHora",   disabled=True),
             "Ciclo":       st.column_config.TextColumn("Ciclo",       disabled=True),
@@ -820,13 +786,9 @@ with tabs[4]:
             "Fuente":      st.column_config.TextColumn("Fuente",      disabled=True),
             "Observaciones": st.column_config.TextColumn("Observaciones", help="Notas / comentarios"),
         }
-
         edited = st.data_editor(
-            dfs,
-            num_rows="dynamic" if not solo_lectura else "fixed",
-            disabled=solo_lectura,
-            column_config=col_cfg,
-            key="sulf_editor"
+            dfs, num_rows="dynamic" if not solo_lectura else "fixed",
+            disabled=solo_lectura, column_config=col_cfg, key="sulf_editor"
         )
 
         c1, c2 = st.columns(2)
@@ -838,18 +800,16 @@ with tabs[4]:
             open_path_hint(path)
 
         if b_apply and not solo_lectura:
-            # Normaliza tipos ANTES de persistir (evita que vuelvan a flotar)
             for c in text_cols:
                 if c in edited.columns:
                     edited[c] = edited[c].astype(str).replace("nan", "").fillna("")
             for c in num_cols:
                 if c in edited.columns:
                     edited[c] = pd.to_numeric(edited[c], errors="coerce")
-
             write_csv_df(csv_sulf, edited)
             st.success("Cambios aplicados.")
 
-        # --------- Grafico mensual por modulo (x horizontal) ----------
+        # --------- Gráfico mensual por módulo ----------
         dfs2 = edited.copy()
         dfs2["__dt"] = dfs2["FechaHora"].apply(lambda x: csv_datetime(str(x)))
         dfs2 = dfs2.dropna(subset=["__dt"])
@@ -905,8 +865,7 @@ with tabs[4]:
                     y=alt.Y("target:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100]))
                 )
                 chart = alt.Chart(plot_df).mark_circle(size=90).encode(
-                    x=alt.X("Modulo:N", title="Modulo", sort="ascending",
-                            axis=alt.Axis(labelAngle=0)),  # horizontal
+                    x=alt.X("Modulo:N", title="Modulo", sort="ascending", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("ISG:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100])),
                     color=alt.Color("Serie:N", title="Serie", scale=alt.Scale(scheme="tableau10")),
                     tooltip=["Modulo","Serie","ISG"]
@@ -916,7 +875,6 @@ with tabs[4]:
                     y="ISG:Q", color="Serie:N"
                 )
                 st.altair_chart(rule + chart + line, use_container_width=True)
-
 
 # ----------------------------------------------- Simulador / Optimizacion
 with tabs[5]:
