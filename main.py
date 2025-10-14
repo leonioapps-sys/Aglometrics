@@ -5,14 +5,14 @@
 import os, json, warnings, calendar
 from datetime import datetime, date
 from typing import Optional, Tuple, Dict, Any, List
-
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
 import joblib
 import sklearn
-from sklearn.exceptions import InconsistentVersionWarning
+#from sklearn.exceptions import InconsistentVersionWarning
 import unicodedata
 
 # =================== CONSTANTES ===================
@@ -206,23 +206,72 @@ def write_csv_df(path: str, df: pd.DataFrame):
     df.to_csv(path, index=False, encoding="utf-8", sep=',')
 
 # =================== MODELOS ===================
-def load_model_safely(path: str):
-    obj = joblib.load(path)
-    model   = obj["model"] if isinstance(obj, dict) and "model" in obj else obj
-    feats   = (obj.get("features") if isinstance(obj, dict) else None) or []
-    meta    = {
-        "target": (obj.get("target") if isinstance(obj, dict) else None),
-        "metrics": (obj.get("metrics") if isinstance(obj, dict) else {}) or {},
-        "sklearn_trained": (obj.get("sklearn") if isinstance(obj, dict) else None),
-        "trained_at": (obj.get("trained_at") if isinstance(obj, dict) else None)
-    }
-    ver_run = sklearn.__version__
-    if meta["sklearn_trained"] and meta["sklearn_trained"] != ver_run:
-        warnings.warn(
-            f"Modelo entrenado con scikit-learn {meta['sklearn_trained']} y ejecutando en {ver_run}.",
-            InconsistentVersionWarning
-        )
+# =================== MODELOS (robustos) ===================
+from pathlib import Path
+import warnings, joblib, sklearn
+
+# Intentar usar skops (más portable que .pkl)
+try:
+    import skops.io as skio
+    _HAS_SKOPS = True
+except Exception:
+    _HAS_SKOPS = False
+
+def _safe_version_warning(meta: dict):
+    """Emite un warning si hay mismatch de scikit-learn, sin romper la carga."""
+    try:
+        trained = meta.get("sklearn_trained")
+        ver_run = sklearn.__version__
+        if trained and trained != ver_run:
+            msg = (f"Modelo entrenado con scikit-learn {trained} y ejecutando en {ver_run}. "
+                   f"Si notas resultados raros, re-exporta a .skops o alinea versiones.")
+            warnings.warn(msg, category=UserWarning)  # <- evita TypeError del InconsistentVersionWarning
+    except Exception:
+        pass
+
+def _unpack_model_object(obj):
+    """Soporta dict envolviendo {'model','features','target','metrics','sklearn','trained_at'} o el modelo directo."""
+    if isinstance(obj, dict):
+        model = obj.get("model", obj)
+        feats = obj.get("features") or []
+        meta = {
+            "target": obj.get("target"),
+            "metrics": obj.get("metrics") or {},
+            "sklearn_trained": obj.get("sklearn"),
+            "trained_at": obj.get("trained_at"),
+        }
+    else:
+        model, feats, meta = obj, [], {"metrics": {}}
+    _safe_version_warning(meta)
     return model, feats, meta
+
+def load_model_safely(path: str | Path):
+    """
+    Carga un modelo desde .skops (preferido) o .pkl.
+    Acepta ruta con o sin extensión (p.ej. 'models/p80_model').
+    Retorna: (model, features:list, meta:dict)
+    """
+    base = Path(path)
+    candidates = [base] if base.suffix else [base.with_suffix(".skops"), base.with_suffix(".pkl")]
+
+    last_err = None
+    for p in candidates:
+        if not p.exists():
+            last_err = FileNotFoundError(f"No existe: {p}")
+            continue
+        try:
+            if p.suffix == ".skops":
+                if not _HAS_SKOPS:
+                    raise ImportError("skops no instalado (agrega 'skops' a requirements.txt).")
+                obj = skio.load(p, trusted=True)
+            else:
+                obj = joblib.load(p)
+            return _unpack_model_object(obj)
+        except Exception as e:
+            last_err = e  # intenta siguiente candidato
+
+    raise RuntimeError(f"No se pudo cargar el modelo desde {base} (.skops/.pkl). Último error: {last_err}")
+
 
 # =================== CALCULOS ===================
 def residence_time_min(rpm: float) -> float:
