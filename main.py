@@ -392,7 +392,7 @@ with tabs[0]:
 
     c1,c2,c3,c4 = st.columns(4)
     carb     = c1.number_input("CO3 (%)", min_value=0.0, value=to_float(defaults.get("carb",0)), key="ing_carb")
-    nitr     = c2.number_input("NO3 (g/L)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
+    nitr     = c2.number_input("NO3 (%)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
     can_mina = c3.number_input("CAN mina (kg/t)", min_value=0.0, value=to_float(defaults.get("can_mina",0)), key="ing_can")
     origen   = c4.text_input("Origen de alimentacion", value=defaults.get("origen",""), key="ing_origen")
 
@@ -916,13 +916,13 @@ with tabs[5]:
 
     c1,c2,c3 = st.columns(3)
     sim_co3   = c1.number_input("CO3 (%)", min_value=0.0, value=0.54, key="sim_co3")
-    sim_no3   = c2.number_input("NO3 (g/L)", min_value=0.0, value=0.09, key="sim_no3")
+    sim_no3   = c2.number_input("NO3 (%)", min_value=0.0, value=0.09, key="sim_no3")
     sim_finos = c3.number_input("Finos #100 (%)", min_value=0.0, max_value=100.0, value=11.0, key="sim_finos")
 
     with st.expander("Parametros quimicos"):
         st.caption("Penalizacion de acido cuando **no** hay modelo ML (referenciales).")
         k_co3  = st.number_input("kg/t extra por 1% CO3", min_value=0.0, value=8.0, step=0.5, key="sim_kco3")
-        k_no3  = st.number_input("kg/t extra por 1 g/L NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
+        k_no3  = st.number_input("kg/t extra por 1% NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
         k_fino = st.number_input("kg/t extra por cada punto de Finos sobre 25%", min_value=0.0, value=0.2, step=0.05, key="sim_kf")
 
     sim_acid_m3h_eff = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (sim_acid_kgt>0 and sim_tph>0) else 0.0
