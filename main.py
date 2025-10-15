@@ -349,12 +349,22 @@ if "isg_rf" in MODELOS:
     model_isg, isg_feats, isg_meta = MODELOS["isg_rf"]
 if "p80_model" in MODELOS:
     model_p80, p80_feats, p80_meta = MODELOS["p80_model"]
-
+    
 col_m1, col_m2 = st.sidebar.columns(2)
+
 with col_m1:
-    st.success("Modelo ISG cargado") if model_isg else st.warning("ISG no cargado")
+    if model_isg:
+        st.success("Modelo ISG cargado")
+    else:
+        st.warning("ISG no cargado")
+
 with col_m2:
-    st.success("Modelo P80 cargado") if model_p80 else st.warning("P80 no cargado")
+    if model_p80:
+        st.success("Modelo P80 cargado")
+    else:
+        st.warning("P80 no cargado")
+
+
 
 if MODELOS_ERR:
     st.sidebar.markdown("**Detalles de modelos no cargados:**")
