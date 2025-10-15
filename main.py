@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# AgloMetrics — versión web con Streamlit
+# AgloMetrics — versión web con Streamlit (sin doble conteo de ácido)
 
 # ======================= IMPORTS =======================
 import os, json, calendar, unicodedata, warnings
@@ -101,7 +101,7 @@ def strip_accents(txt: str) -> str:
     return ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
 
 def normalize_hist_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty: 
+    if df.empty:
         return pd.DataFrame(columns=HIST_HEAD)
     mapping = {
         "fecha":"Fecha","ingeniero":"Ingeniero","turno":"Turno","ciclo":"Ciclo",
@@ -284,15 +284,22 @@ def load_all_models():
 
 MODELOS, MODELOS_ERR = load_all_models()
 
-# ======================= CALCULOS =======================
+# ======================= CÁLCULOS =======================
 def residence_time_min(rpm: float) -> float:
     rpm=max(0.1,rpm)
     return Proc.TRES_7RPM * (7.0 / rpm)
 
-def humedad_balance(h0,tph,agua_m3h=0.0,acido_m3h=0.0,agua_kgt=0.0,acido_kgt=0.0):
+def humedad_balance(h0, tph, agua_m3h=0.0, acido_m3h=0.0, agua_kgt=0.0, acido_kgt=0.0):
+    """
+    Humedad por balance. Evita doble conteo:
+    - Considera agua_m3h (como caudal total por flautas de agua, incluya o no RAL).
+    - Considera acido_kgt (ácido por flautas de ácido).
+    - Ignora acido_m3h (dejar en 0.0 en llamadas).
+    """
     if tph<=0: return clamp(h0,0.0,100.0)
     agua_k = nonneg(agua_kgt) + (nonneg(agua_m3h)*Proc.RHO_W*1000)/max(tph,1e-9)
-    acido_k= nonneg(acido_kgt)+ (nonneg(acido_m3h)*Proc.RHO_H2SO4*1000)/max(tph,1e-9)
+    # acido_k: solo desde kg/t (NO sumar m3/h de ácido para no duplicar)
+    acido_k = nonneg(acido_kgt)
     return clamp(h0 + 0.1*(agua_k+acido_k), 0.0, 100.0)
 
 def evaluar_p80(p80,cu,tph):
@@ -302,16 +309,25 @@ def evaluar_p80(p80,cu,tph):
     estado = f"P80: {p80:.1f}% OK" if deficit<=0 else f"P80: {p80:.1f}% (deficit {deficit:.1f} pts)"
     return estado, kg_cu_h
 
-def calc_isg_formula(cu,cu_sol,tph,acido_m3h,acid_gpl,acido_kgt, extra_kgt=0.0):
-    cu_use = cu_sol if cu_sol>0 else cu
-    cu_kg_h = tph*1000*(cu_use/100.0)
-    need = Proc.MRATIO*cu_kg_h + max(0.0, extra_kgt)*max(tph,0.0)
+def calc_isg_formula(cu, cu_sol, tph, agua_m3h, acid_gpl, acido_kgt, extra_kgt=0.0):
+    """
+    Ácido disponible:
+      - Desde flautas de ácido: tph * acido_kgt  (kg/h)
+      - Desde RAL: si acid_gpl>0, agua_m3h * acid_gpl  (kg/h, g/L ≈ kg/m3)
+    SIN fallback de tratar caudal como ácido puro.
+    """
+    cu_use   = cu_sol if cu_sol>0 else cu
+    cu_kg_h  = tph*1000*(cu_use/100.0)
+    need     = Proc.MRATIO*cu_kg_h + max(0.0, extra_kgt)*max(tph,0.0)
+
     avail_kgph = 0.0
-    if acido_kgt>0: avail_kgph += tph*acido_kgt
-    if acido_m3h>0 and acid_gpl>0: avail_kgph += acido_m3h*acid_gpl
-    elif acido_m3h>0: avail_kgph += acido_m3h*Proc.RHO_H2SO4*1000
-    grado = 0.0 if need<=0 else avail_kgph/need
-    return max(0.0,min(1.0,grado))*100.0, need, avail_kgph, (avail_kgph-need)
+    if acido_kgt>0:
+        avail_kgph += tph*acido_kgt
+    if acid_gpl>0 and agua_m3h>0:
+        avail_kgph += agua_m3h*acid_gpl
+
+    grado = 0.0 if need<=0 else avail_kgph/max(need,1e-9)
+    return clamp(grado*100.0, 0.0, 100.0), need, avail_kgph, (avail_kgph-need)
 
 def finos_flag(f):
     if f is None: return "—"
@@ -326,7 +342,7 @@ st.sidebar.subheader("Optimizacion aglomerado con ML")
 solo_lectura = st.sidebar.toggle("🔒 Modo Solo Lectura", value=False,
                                  help="Bloquea escritura en CSV y ediciones.")
 
-# Estado de modelos sin usar expresiones inline (evita TypeError raros)
+# Estado de modelos
 model_isg  = None; isg_feats=None; isg_meta={}
 model_p80  = None; p80_feats=None; p80_meta={}
 if "isg_rf" in MODELOS:
@@ -336,15 +352,9 @@ if "p80_model" in MODELOS:
 
 col_m1, col_m2 = st.sidebar.columns(2)
 with col_m1:
-    if model_isg:
-        st.success("Modelo ISG cargado")
-    else:
-        st.warning("ISG no cargado")
+    st.success("Modelo ISG cargado") if model_isg else st.warning("ISG no cargado")
 with col_m2:
-    if model_p80:
-        st.success("Modelo P80 cargado")
-    else:
-        st.warning("P80 no cargado")
+    st.success("Modelo P80 cargado") if model_p80 else st.warning("P80 no cargado")
 
 if MODELOS_ERR:
     st.sidebar.markdown("**Detalles de modelos no cargados:**")
@@ -392,7 +402,7 @@ with tabs[0]:
 
     c1,c2,c3,c4 = st.columns(4)
     carb     = c1.number_input("CO3 (%)", min_value=0.0, value=to_float(defaults.get("carb",0)), key="ing_carb")
-    nitr     = c2.number_input("NO3 (%)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
+    nitr     = c2.number_input("NO3 (g/L)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
     can_mina = c3.number_input("CAN mina (kg/t)", min_value=0.0, value=to_float(defaults.get("can_mina",0)), key="ing_can")
     origen   = c4.text_input("Origen de alimentacion", value=defaults.get("origen",""), key="ing_origen")
 
@@ -424,8 +434,8 @@ with tabs[0]:
         if cus>cut: errs.append("Cu soluble no puede exceder CuT.")
         for msg in errs: st.warning("⚠️ "+msg)
 
-        acid_m3h_eff = (tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (acid_kgt>0 and tph>0) else 0.0
-        h_bal = humedad_balance(hum, tph, agua_m3h, acid_m3h_eff, agua_kgt, acid_kgt)
+        # Humedad: agua_m3h + ácido kg/t (sin sumar flujo de ácido en m3/h para evitar doble conteo)
+        h_bal = humedad_balance(hum, tph, agua_m3h, 0.0, agua_kgt, acid_kgt)
         st.info(f"**Humedad por balance:** {h_bal:.2f}% — Objetivo 10–12% → " + ("OK" if 10.0<=h_bal<=12.0 else "Fuera de rango"))
 
         estado_p80, kg_cu_h = evaluar_p80(p80, cut, tph)
@@ -440,11 +450,13 @@ with tabs[0]:
         pct = (delta/can_mina*100.0) if can_mina>0 else 0.0
         st.write(f"Acido flauta: {acid_kgt:.2f} | CAN mina: {can_mina:.2f} | Δ {delta:+.2f} kg/t ({pct:+.1f}%)")
 
-        # ISG (modelo o formula)
+        # ISG (modelo o fórmula): ácido disponible = flautas (kg/t) + RAL (agua_m3h * g/L)
         agua_kgt_full = agua_kgt + (agua_m3h*Proc.RHO_W*1000.0/max(tph,1e-9) if tph>0 else 0.0)
         t_res = residence_time_min(rpm)
 
-        isg_formula, need_kgph, avail_kgph, diff_kgph = calc_isg_formula(cut, cus, tph, acid_m3h_eff, acid_gpl, acid_kgt)
+        isg_formula, need_kgph, avail_kgph, diff_kgph = calc_isg_formula(
+            cut, cus, tph, agua_m3h, acid_gpl, acid_kgt
+        )
         diff_kgt = diff_kgph / max(tph, 1e-9) if tph>0 else 0.0
 
         feature_map = {
@@ -494,6 +506,9 @@ with tabs[0]:
                 except Exception:
                     p80_est = Proc.OBJ_P80
 
+            # Solo referencia de conversión: m3/h equivalentes desde kg/t (no usado en cálculos)
+            acido_m3_h_calc = (tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (acid_kgt>0 and tph>0) else 0.0
+
             row = {
                 "Fecha": fecha_ui,
                 "Ingeniero": ingeniero, "Turno": turno, "Ciclo": ciclo, "Modulo": modulo,
@@ -502,7 +517,7 @@ with tabs[0]:
                 "Origen": origen, "RAL": f"{acid_gpl:g}",
                 "P80_real%": f"{p80:.1f}", "P25%": f"{p25:.1f}", "Finos_100#_%": f"{finos:.1f}",
                 "Ton_turno_t": f"{turno_t:g}", "RPM": f"{rpm:g}",
-                "Acido_m3_h_calc": f"{(tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0):.3f}",
+                "Acido_m3_h_calc": f"{acido_m3_h_calc:.3f}",
                 "P80_est%": f"{p80_est:.1f}", "ISG_est%": f"{isg_est:.1f}",
                 "Perd_kgCu_h": f"{kg_cu_h:.0f}", "Perd_turno_kg": f"{perd_turno:.0f}", "Perd_dia_kg": f"{perd_dia:.0f}",
             }
@@ -596,7 +611,6 @@ with tabs[1]:
 
         st.caption(f"{len(dfv)} registro(s)")
 
-        # Asegurar DataFrame antes de pasar al editor (evita errores de conversión)
         if not isinstance(dfv, pd.DataFrame):
             st.error("Vista de datos no válida.")
         else:
@@ -916,22 +930,22 @@ with tabs[5]:
 
     c1,c2,c3 = st.columns(3)
     sim_co3   = c1.number_input("CO3 (%)", min_value=0.0, value=0.54, key="sim_co3")
-    sim_no3   = c2.number_input("NO3 (%)", min_value=0.0, value=0.09, key="sim_no3")
+    sim_no3   = c2.number_input("NO3 (g/L)", min_value=0.0, value=0.09, key="sim_no3")
     sim_finos = c3.number_input("Finos #100 (%)", min_value=0.0, max_value=100.0, value=11.0, key="sim_finos")
 
     with st.expander("Parametros quimicos"):
         st.caption("Penalizacion de acido cuando **no** hay modelo ML (referenciales).")
         k_co3  = st.number_input("kg/t extra por 1% CO3", min_value=0.0, value=8.0, step=0.5, key="sim_kco3")
-        k_no3  = st.number_input("kg/t extra por 1% NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
+        k_no3  = st.number_input("kg/t extra por 1 g/L NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
         k_fino = st.number_input("kg/t extra por cada punto de Finos sobre 25%", min_value=0.0, value=0.2, step=0.05, key="sim_kf")
 
-    sim_acid_m3h_eff = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (sim_acid_kgt>0 and sim_tph>0) else 0.0
-    sim_hbal = humedad_balance(sim_h, sim_tph, sim_agua_m3h, sim_acid_m3h_eff, 0.0, sim_acid_kgt)
+    # Humedad simulada: agua_m3h + ácido kg/t (sin flujos de ácido en m3/h)
+    sim_hbal = humedad_balance(sim_h, sim_tph, sim_agua_m3h, 0.0, 0.0, sim_acid_kgt)
     sim_tres = residence_time_min(sim_rpm)
 
     penalty_kgt = k_co3*sim_co3 + k_no3*sim_no3 + k_fino*max(0.0, sim_finos-25.0)
     sim_isg_formula, need_kgph_s, avail_kgph_s, diff_kgph_s = calc_isg_formula(
-        sim_cut, sim_cus, sim_tph, sim_acid_m3h_eff, sim_ral, sim_acid_kgt, extra_kgt=penalty_kgt
+        sim_cut, sim_cus, sim_tph, sim_agua_m3h, sim_ral, sim_acid_kgt, extra_kgt=penalty_kgt
     )
 
     if model_isg is not None:
@@ -961,7 +975,9 @@ with tabs[5]:
         st.warning("Define TPH y CuT para recomendar.")
     else:
         need_target = Proc.MRATIO * (sim_tph*1000*(max(sim_cus, sim_cut*0.6)/100.0))
-        vol_kgph = sim_acid_m3h_eff*sim_ral if (sim_acid_m3h_eff>0 and sim_ral>0) else 0.0
+        # Ácido aportado por RAL (si hay): agua_m3h * g/L
+        vol_kgph = sim_agua_m3h*sim_ral if (sim_agua_m3h>0 and sim_ral>0) else 0.0
         req_kgt = max(0.0, (need_target + penalty_kgt*sim_tph - vol_kgph)/max(sim_tph,1e-9))
         st.success(f"Para ISG≈{Proc.ISG_SET:.0f}% el piso recomendado es **{req_kgt:.2f} kg/t** (con RAL y penalizaciones actuales).")
+
 
