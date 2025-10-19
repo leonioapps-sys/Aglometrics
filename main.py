@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# AgloMetrics — versión web con Streamlit
+# AgloMetrics — versión web con Streamlit (parches 17/10)
 
 # ======================= IMPORTS =======================
 import os, json, calendar, unicodedata, warnings
@@ -20,12 +20,12 @@ st.set_page_config(page_title="AgloMetrics", layout="wide")
 # ======================= CONSTANTES =======================
 class Proc:
     OBJ_P80   = 80.0
-    ISG_SET   = 60.0   # <--- objetivo subido a 60%
+    ISG_SET   = 60.0          # <— objetivo subido a 60%
     GAMMA     = 0.50
-    RHO_W     = 1.0        # t/m3
-    RHO_H2SO4 = 1.84       # t/m3
-    MRATIO    = 98.0/63.55 # kg H2SO4 / kg Cu
-    TRES_7RPM = 0.80       # min a 7 rpm (ajustable)
+    RHO_W     = 1.0           # t/m3
+    RHO_H2SO4 = 1.84          # t/m3
+    MRATIO    = 98.0/63.55    # kg H2SO4 / kg Cu
+    TRES_7RPM = 0.80          # min a 7 rpm (ajustable)
 
 HIST_HEAD = [
     "Fecha","Ingeniero","Turno","Ciclo","Modulo",
@@ -33,11 +33,13 @@ HIST_HEAD = [
     "CuT%","CuS%","CO3%","NO3%","CAN_mina_kg_t",
     "Origen","RAL","P80_real%","P25%","Finos_100#_%",
     "Ton_turno_t","RPM",
-    "Acido_m3_h_calc","P80_est%","ISG_est%",
+    "Acido_m3_h_calc","P80_est%","ISG_est%","ISG_formula%",   # <- suma columna opcional para fórmula
     "Perd_kgCu_h","Perd_turno_kg","Perd_dia_kg"
 ]
+
 MOD_HEAD = ["FechaHora","Ciclo","Modulo","Ton_total_t","Acido_m3","Agua_m3",
             "P80_real%","Finos_100#_%","Perdida_Cu_texto","ISG_est_mod%","ISG_real%","Observaciones"]
+
 SULF_HEAD = ["FechaHora","Ciclo","Modulo","ISG_est%","ISG_real%","Fuente","Observaciones"]
 
 MONTHS = {"enero":1,"ene":1,"febrero":2,"feb":2,"marzo":3,"mar":3,"abril":4,"abr":4,
@@ -85,10 +87,8 @@ def parse_date_any(s: str)->Optional[Tuple[int,int,Optional[int]]]:
     t=t.replace('-', ' ').replace('/', ' ')
     nums=[p for p in t.split() if re.fullmatch(r'\d+',p)]
     if len(nums)>=2:
-        d,m=int(nums[0]),int(nums[1])
-        y=int(nums[2]) if len(nums)>=3 else None
-        if y is not None and y < 100:
-            y = y+2000 if y<=69 else y+1900
+        d,m=int(nums[0]),int(nums[1]); y=int(nums[2]) if len(nums)>=3 else None
+        if y is not None and y<100: y = y+2000 if y<=69 else y+1900
         return (d,m,y)
     return None
 
@@ -119,7 +119,7 @@ def normalize_hist_columns(df: pd.DataFrame) -> pd.DataFrame:
         "finos -100# %":"Finos_100#_%","finos 100# %":"Finos_100#_%","finos #100 (%)":"Finos_100#_%",
         "ton turno t":"Ton_turno_t","rpm":"RPM",
         "acido m3/h calc":"Acido_m3_h_calc",
-        "p80 est%":"P80_est%","isg est%":"ISG_est%",
+        "p80 est%":"P80_est%","isg est%":"ISG_est%","isg formula%":"ISG_formula%",
         "perd kgcu/h":"Perd_kgCu_h","perd turno kg":"Perd_turno_kg","perd dia kg":"Perd_dia_kg"
     }
     new = {}
@@ -246,7 +246,11 @@ def load_model_safely(path: str | Path):
             if p.suffix == ".skops":
                 if not _HAS_SKOPS:
                     raise ImportError("skops no instalado (agrega 'skops' a requirements.txt).")
-                obj = skio.load(p, trusted=True)
+                # Algunas versiones antiguas no aceptan 'trusted' al guardar, pero sí al cargar
+                try:
+                    obj = skio.load(p, trusted=True)
+                except TypeError:
+                    obj = skio.load(p)
             else:
                 obj = joblib.load(p)
             return _unpack_model_object(obj)
@@ -286,17 +290,15 @@ def load_all_models():
 
 MODELOS, MODELOS_ERR = load_all_models()
 
-# ======================= CALCULOS =======================
+# ======================= CÁLCULOS =======================
 def residence_time_min(rpm: float) -> float:
     rpm=max(0.1,rpm)
     return Proc.TRES_7RPM * (7.0 / rpm)
 
 def humedad_balance(h0,tph,agua_m3h=0.0,acido_m3h_equiv=0.0,agua_kgt=0.0,acido_kgt=0.0):
     """
-    Balance de humedad:
-      - agua_m3h: caudal de agua (m3/h)
-      - acido_m3h_equiv: SOLO el volumen equivalente de ácido de flautas (derivado de kg/t). NO incluye RAL.
-      - RAL no suma volumen adicional más allá del agua (evita doble conteo).
+    - Sólo se considera el ácido de flautas (kg/t) convertido a m3/h como 'acido_m3h_equiv'.
+    - NO se usa RAL (g/L) en el balance de humedad (evita doble conteo).
     """
     if tph<=0: return clamp(h0,0.0,100.0)
     agua_k = nonneg(agua_kgt) + (nonneg(agua_m3h)*Proc.RHO_W*1000)/max(tph,1e-9)
@@ -307,43 +309,38 @@ def evaluar_p80(p80,cu,tph):
     deficit = nonneg(Proc.OBJ_P80 - p80)
     frac = Proc.GAMMA * (deficit/100.0)
     kg_cu_h = tph*1000*(cu/100.0)*frac
-    estado = f"P80: {p80:.1f}% OK" if deficit<=0 else f"P80: {p80:.1f}% (deficit {deficit:.1f} pts)"
+    estado = f"P80: {p80:.1f}% OK" if deficit<=0 else f"P80: {p80:.1f}% (déficit {deficit:.1f} pts)"
     return estado, kg_cu_h
 
-def calc_isg_formula(cu, cu_sol, tph, agua_m3h, acid_gpl, acido_kgt, extra_kgt=0.0):
+def calc_isg_formula(cu,cu_sol,tph,agua_m3h,acid_gpl,acido_kgt, extra_kgt=0.0):
     """
-    ISG por balance estequiométrico (en %):
-      - Aporte 1: ácido en flautas -> tph * acido_kgt  (kg/h)
-      - Aporte 2: RAL en el agua  -> agua_m3h * acid_gpl (kg/h)
-      - 'extra_kgt' captura penalizaciones (CO3, NO3, finos, etc.) en kg/t adicionales.
+    ISG(fórmula) = min(1, max(0, ácido_disponible / ácido_requerido)) * 100
+    - ácido_disponible (kg/h) = tph*acido_kgt + agua_m3h*acid_gpl
+    - ácido_requerido (kg/h)  = MRATIO * (tph*1000*Cu_util) + extra_kgt*tph
     """
     cu_use = cu_sol if cu_sol>0 else cu
     cu_kg_h = tph*1000*(cu_use/100.0)
     need = Proc.MRATIO*cu_kg_h + max(0.0, extra_kgt)*max(tph,0.0)
-
     avail_kgph = 0.0
-    if acido_kgt>0:                  # ácido dosificado en flautas (kg/t)
-        avail_kgph += tph*acido_kgt
-    if agua_m3h>0 and acid_gpl>0:    # RAL aportado por el agua (g/L ~ kg/m3)
-        avail_kgph += agua_m3h*acid_gpl
-
+    if acido_kgt>0: avail_kgph += tph*acido_kgt
+    if agua_m3h>0 and acid_gpl>0: avail_kgph += agua_m3h*acid_gpl
     grado = 0.0 if need<=0 else avail_kgph/need
     return max(0.0,min(1.0,grado))*100.0, need, avail_kgph, (avail_kgph-need)
 
 def finos_flag(f):
     if f is None: return "—"
-    return "Rojo" if f>30 else ("Ambar" if f>=25 else "OK")
+    return "Rojo" if f>30 else ("Ámbar" if f>=25 else "OK")
 
 # ======================= SIDEBAR =======================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
     st.sidebar.image("AgloMetrics_P80_icon_512.png", width=240)
 
 st.sidebar.title("AgloMetrics — Web")
-st.sidebar.subheader("Optimizacion aglomerado con ML")
+st.sidebar.subheader("Optimización aglomerado con ML")
 solo_lectura = st.sidebar.toggle("🔒 Modo Solo Lectura", value=False,
                                  help="Bloquea escritura en CSV y ediciones.")
 
-# Estado de modelos
+# === Estado de modelos en la sidebar (sin condicionales inline) ===
 model_isg  = None; isg_feats=None; isg_meta={}
 model_p80  = None; p80_feats=None; p80_meta={}
 if "isg_rf" in MODELOS:
@@ -352,28 +349,32 @@ if "p80_model" in MODELOS:
     model_p80, p80_feats, p80_meta = MODELOS["p80_model"]
 
 col_m1, col_m2 = st.sidebar.columns(2)
-with col_m1:
-    st.success("Modelo ISG cargado") if model_isg else st.warning("ISG no cargado")
-with col_m2:
-    st.success("Modelo P80 cargado") if model_p80 else st.warning("P80 no cargado")
 
-if MODELOS_ERR:
-    st.sidebar.markdown("**Detalles de modelos no cargados:**")
-    for k,v in MODELOS_ERR.items():
-        st.sidebar.markdown(f"- **{k}**: {v}")
+with col_m1:
+    if model_isg is not None:
+        st.success("Modelo ISG cargado")
+    else:
+        st.warning(f"ISG no cargado: {MODELOS_ERR.get('isg_rf','(archivo no encontrado)')}")
+
+with col_m2:
+    if model_p80 is not None:
+        st.success("Modelo P80 cargado")
+    else:
+        st.warning(f"P80 no cargado: {MODELOS_ERR.get('p80_model','(archivo no encontrado)')}")
+
 
 # ======================= RUTAS CSV =======================
 csv_hist, csv_mod, csv_sulf, last_form = csv_paths()
 
 # ======================= TABS =======================
 tabs = st.tabs([
-    "Ingreso", "Historicos", "Termino Modulo",
-    "Hist. Modulos", "Hist. Sulfatacion", "Simulador / Optimizacion"
+    "Ingreso", "Históricos", "Término Módulo",
+    "Hist. Módulos", "Hist. Sulfatación", "Simulador / Optimización"
 ])
 
 # ------------------------------------------------ Ingreso
 with tabs[0]:
-    st.subheader("Ingreso — Control de Aglomeracion")
+    st.subheader("Ingreso — Control de Aglomeración")
 
     defaults = {}
     if st.session_state.get("load_defaults") and os.path.exists(last_form):
@@ -387,25 +388,25 @@ with tabs[0]:
     fecha_ui  = c1.text_input("Fecha del registro (dd/mm/aaaa)", value=date.today().strftime("%d/%m/%Y"), key="ing_fecha")
     ingeniero = c2.text_input("Ingeniero", value=defaults.get("ingeniero",""), key="ing_ingeniero")
     turno     = c3.selectbox("Turno", ["A","B"], index=0 if defaults.get("turno","A").upper()!="B" else 1, key="ing_turno")
-    ciclo     = c4.text_input("Ciclo modulo", value=defaults.get("ciclo",""), key="ing_ciclo")
+    ciclo     = c4.text_input("Ciclo módulo", value=defaults.get("ciclo",""), key="ing_ciclo")
 
     c1,c2,c3,c4 = st.columns(4)
-    modulo   = c1.text_input("Numero modulo", value=defaults.get("modulo",""), key="ing_modulo")
+    modulo   = c1.text_input("Número módulo", value=defaults.get("modulo",""), key="ing_modulo")
     tph      = c2.number_input("TPH pasante (t/h)", min_value=0.0, value=to_float(defaults.get("tph",0)), key="ing_tph")
     hum      = c3.number_input("Humedad inicial (%)", min_value=0.0, max_value=100.0, value=to_float(defaults.get("hum",0)), key="ing_h")
     agua_kgt = c4.number_input("Agua en flautas (kg/t)", min_value=0.0, value=to_float(defaults.get("agua_kgt",0)), key="ing_agua_kgt")
 
     c1,c2,c3,c4 = st.columns(4)
-    agua_m3h = c1.number_input("Agua m3/h", min_value=0.0, value=to_float(defaults.get("agua_m3h",0)), key="ing_agua_m3h")
-    acid_kgt = c2.number_input("Acido (kg/t)", min_value=0.0, value=to_float(defaults.get("acid_kgt",0)), key="ing_acid_kgt")
+    agua_m3h = c1.number_input("Agua m³/h", min_value=0.0, value=to_float(defaults.get("agua_m3h",0)), key="ing_agua_m3h")
+    acid_kgt = c2.number_input("Ácido (kg/t) (flautas)", min_value=0.0, value=to_float(defaults.get("acid_kgt",0)), key="ing_acid_kgt")
     cut      = c3.number_input("CuT (%)", min_value=0.0, max_value=100.0, value=to_float(defaults.get("cut",0)), key="ing_cut")
     cus      = c4.number_input("Cu soluble (%)", min_value=0.0, max_value=100.0, value=to_float(defaults.get("cus",0)), key="ing_cus")
 
     c1,c2,c3,c4 = st.columns(4)
     carb     = c1.number_input("CO3 (%)", min_value=0.0, value=to_float(defaults.get("carb",0)), key="ing_carb")
-    nitr     = c2.number_input("NO3 (g/L)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
+    nitr     = c2.number_input("NO3 (%)", min_value=0.0, value=to_float(defaults.get("nitr",0)), key="ing_nitr")
     can_mina = c3.number_input("CAN mina (kg/t)", min_value=0.0, value=to_float(defaults.get("can_mina",0)), key="ing_can")
-    origen   = c4.text_input("Origen de alimentacion", value=defaults.get("origen",""), key="ing_origen")
+    origen   = c4.text_input("Origen de alimentación", value=defaults.get("origen",""), key="ing_origen")
 
     c1,c2,c3,c4 = st.columns(4)
     acid_gpl = c1.number_input("RAL (g/L)", min_value=0.0, value=to_float(defaults.get("acid_gpl",0)), key="ing_ral")
@@ -431,44 +432,42 @@ with tabs[0]:
     # ---------- CÁLCULOS ----------
     if calcular or guardar:
         errs = []
-        if tph<=0: errs.append("TPH debe ser > 0 para calculos completos.")
+        if tph<=0: errs.append("TPH debe ser > 0 para cálculos completos.")
         if cus>cut: errs.append("Cu soluble no puede exceder CuT.")
         for msg in errs: st.warning("⚠️ "+msg)
 
-        # Volumen equivalente de ácido desde kg/t (SOLO para humedad)
+        # Ácido de flautas (kg/t) → m3/h equivalente (SÓLO para humedad)
         acid_m3h_equiv = (tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (acid_kgt>0 and tph>0) else 0.0
+
+        # Humedad (evita doble conteo: NO usa RAL)
         h_bal = humedad_balance(hum, tph, agua_m3h, acid_m3h_equiv, agua_kgt, acid_kgt)
         st.info(f"**Humedad por balance:** {h_bal:.2f}% — Objetivo 10–12% → " + ("OK" if 10.0<=h_bal<=12.0 else "Fuera de rango"))
 
         estado_p80, kg_cu_h = evaluar_p80(p80, cut, tph)
         st.write(f"**{estado_p80}** | 1/4'' muestrera: {p25:.1f}% pasante")
-        st.write(f"**Perdida estimada:** {pretty_kg(kg_cu_h)} kg Cu/h")
+        st.write(f"**Pérdida estimada:** {pretty_kg(kg_cu_h)} kg Cu/h")
         perd_turno = kg_cu_h*(turno_t/max(tph,1e-9)) if (turno_t>0 and tph>0) else 0.0
         perd_dia = kg_cu_h*24.0
-        st.write(f"Perdida turno: {pretty_kg(perd_turno)} kg Cu | Perdida dia: {pretty_kg(perd_dia)} kg Cu")
+        st.write(f"Pérdida turno: {pretty_kg(perd_turno)} kg Cu | Pérdida día: {pretty_kg(perd_dia)} kg Cu")
         st.write(f"Finos #100: {finos:.1f}% → **{finos_flag(finos)}**")
 
         delta = acid_kgt - can_mina
         pct = (delta/can_mina*100.0) if can_mina>0 else 0.0
-        st.write(f"Acido flauta: {acid_kgt:.2f} | CAN mina: {can_mina:.2f} | Δ {delta:+.2f} kg/t ({pct:+.1f}%)")
+        st.write(f"Ácido flauta: {acid_kgt:.2f} | CAN mina: {can_mina:.2f} | Δ {delta:+.2f} kg/t ({pct:+.1f}%)")
 
-        # ---- ISG (modelo o formula) ----
+        # ISG por FÓRMULA (con RAL)
+        isg_formula, need_kgph, avail_kgph, diff_kgph = calc_isg_formula(cut, cus, tph, agua_m3h, acid_gpl, acid_kgt)
+        diff_kgt = diff_kgph / max(tph, 1e-9) if tph>0 else 0.0
+
+        # ISG por MODELO (ML)
         agua_kgt_full = agua_kgt + (agua_m3h*Proc.RHO_W*1000.0/max(tph,1e-9) if tph>0 else 0.0)
         t_res = residence_time_min(rpm)
 
-        # *** SIN doble conteo ***
-        # Para estequiometría: usar agua_m3h (no el equivalente desde kg/t) + acid_gpl + acid_kgt.
-        isg_formula, need_kgph, avail_kgph, diff_kgph = calc_isg_formula(
-            cut, cus, tph, agua_m3h, acid_gpl, acid_kgt
-        )
-        diff_kgt = diff_kgph / max(tph, 1e-9) if tph>0 else 0.0
-
-        # ML
         feature_map = {
             "humedad_balance": h_bal, "hum%": h_bal,
             "cut%": cut, "cut": cut,
             "cus%": cus, "cus": cus,
-            "no3": nitr, "no3_gpl": nitr,
+            "no3": nitr, "no3%": nitr, "no3_gpl": nitr,
             "co3": carb, "co3_%": carb,
             "tph": tph,
             "acid_kgt": acid_kgt, "acido_kgt": acid_kgt,
@@ -486,45 +485,34 @@ with tabs[0]:
                 isg_est = clamp(isg_est,0,100)
                 fuente = "Modelo ML"
             except Exception:
-                isg_est = isg_formula; fuente = "Formula (fallback)"
+                isg_est = isg_formula; fuente = "Fórmula (fallback)"
         else:
-            isg_est = isg_formula; fuente = "Formula"
+            isg_est = isg_formula; fuente = "Fórmula"
 
         # Mostrar ambos resultados
-        st.success(f"ISG por **fórmula**: **{isg_formula:.1f}%** · (Disponible {pretty_kg(avail_kgph)} / Requerido {pretty_kg(need_kgph)} kg/h)")
-        st.info(   f"ISG por **modelo ML**: **{isg_est:.1f}%** · {fuente}")
+        cA, cB = st.columns(2)
+        cA.success(f"ISG estimado (ML): **{isg_est:.1f}%** · {fuente}")
+        cB.info(   f"ISG (Fórmula): **{isg_formula:.1f}%** · (usa RAL en ácido disponible)")
 
-        # Estado respecto al objetivo
-        if isg_formula >= Proc.ISG_SET:
-            st.success(f"✅ Fórmula ≥ objetivo ({Proc.ISG_SET:.0f}%). Δ {pretty_kg(diff_kgph)} kg/h ({diff_kgt:+.2f} kg/t).")
-        else:
-            st.error(f"⚠️ Fórmula < objetivo ({Proc.ISG_SET:.0f}%). Faltan ≈ **{pretty_kg(-diff_kgph)} kg/h** (≈ {abs(diff_kgt):.2f} kg/t).")
+        # Chequeo contra objetivo y pauta de corrección (kg/t)
+        target_frac = Proc.ISG_SET/100.0
+        need_for_target = need_kgph*target_frac
+        delta_target_kgph = need_for_target - avail_kgph
+        delta_target_kgt = delta_target_kgph/max(tph,1e-9) if tph>0 else 0.0
 
-        # === Corrección sugerida hacia el objetivo (basada en estequiometría) ===
-        T = Proc.ISG_SET / 100.0
-        avail_req_for_target = need_kgph * T
-        extra_kgph = max(0.0, avail_req_for_target - avail_kgph)    # ácido adicional requerido (kg/h)
-        ahorro_kgph = max(0.0, avail_kgph - avail_req_for_target)   # excedente (kg/h)
-
-        delta_kgt = (extra_kgph / max(tph, 1e-9))                   # subir flautas (kg/t)
-        delta_ral = (extra_kgph / max(agua_m3h, 1e-9)) if agua_m3h>0 else np.nan  # alternativa por RAL (g/L)
-
-        st.markdown("### Corrección sugerida hacia el objetivo")
-        if extra_kgph > 0:
-            st.error(
-                f"Falta ácido para llegar a **{Proc.ISG_SET:.0f}%**:\n\n"
-                f"- **Añadir** ≈ **{pretty_kg(extra_kgph)} kg/h** de H₂SO₄\n"
-                f"- Equivalente a **+{delta_kgt:.2f} kg/t** en flautas de ácido"
-                + (f"\n- **Alternativa:** **+{delta_ral:.1f} g/L** en RAL (con el caudal de agua actual)" if np.isfinite(delta_ral) else "")
-            )
-        else:
+        if isg_est >= Proc.ISG_SET or isg_formula >= Proc.ISG_SET:
             st.success(
-                f"Tienes excedente respecto a **{Proc.ISG_SET:.0f}%**:\n\n"
-                f"- **Podrías reducir** ≈ **{pretty_kg(ahorro_kgph)} kg/h** de H₂SO₄\n"
-                f"- Equivalente a **-{(ahorro_kgph/max(tph,1e-9)):.2f} kg/t**"
-                + (f"\n- **Alternativa:** **-{(ahorro_kgph/max(agua_m3h,1e-9)):.1f} g/L** en RAL" if agua_m3h>0 else "")
+                f"✅ ISG cumple/roza objetivo ({Proc.ISG_SET:.0f}%). "
+                f"Ácido disp. **{pretty_kg(avail_kgph)}** kg/h, req. **{pretty_kg(need_kgph)}** kg/h "
+                f"(Δ {pretty_kg(diff_kgph)} kg/h, {diff_kgt:+.2f} kg/t)."
             )
-        st.caption("Nota: La pauta usa balance estequiométrico (física del proceso). El ML es referencia predictiva adicional.")
+        else:
+            st.warning(
+                f"⚠️ ISG bajo objetivo ({Proc.ISG_SET:.0f}%). "
+                f"Faltan ≈ **{pretty_kg(max(0.0, -diff_kgph))} kg/h** de H₂SO₄ respecto a ‘necesario’, "
+                f"y para llegar a objetivo: **{pretty_kg(max(0.0, delta_target_kgph))} kg/h** "
+                f"(≈ {max(0.0,delta_target_kgt):.2f} kg/t adicionales)."
+            )
 
         # ---------- Guardar ----------
         if guardar and not solo_lectura:
@@ -548,8 +536,10 @@ with tabs[0]:
                 "Origen": origen, "RAL": f"{acid_gpl:g}",
                 "P80_real%": f"{p80:.1f}", "P25%": f"{p25:.1f}", "Finos_100#_%": f"{finos:.1f}",
                 "Ton_turno_t": f"{turno_t:g}", "RPM": f"{rpm:g}",
-                "Acido_m3_h_calc": f"{acid_m3h_equiv:.3f}",  # sólo referencia de humedad
-                "P80_est%": f"{p80_est:.1f}", "ISG_est%": f"{isg_est:.1f}",
+                "Acido_m3_h_calc": f"{acid_m3h_equiv:.3f}",
+                "P80_est%": f"{p80_est:.1f}",
+                "ISG_est%": f"{isg_est:.1f}",
+                "ISG_formula%": f"{isg_formula:.1f}",
                 "Perd_kgCu_h": f"{kg_cu_h:.0f}", "Perd_turno_kg": f"{perd_turno:.0f}", "Perd_dia_kg": f"{perd_dia:.0f}",
             }
             df = read_csv_df(csv_hist, HIST_HEAD, kind="hist")
@@ -574,12 +564,12 @@ with tabs[0]:
                 dfs.loc[idx_to_update, "FechaHora"] = fecha_hora
                 dfs.loc[idx_to_update, "Modulo"]    = str(modulo)
                 dfs.loc[idx_to_update, "ISG_est%"]  = f"{isg_est:.1f}"
-                dfs.loc[idx_to_update, "Fuente"]    = "Modelo ML" if model_isg else "Formula"
+                dfs.loc[idx_to_update, "Fuente"]    = "Modelo ML" if model_isg else "Fórmula"
             else:
-                dfs.loc[len(dfs)] = [fecha_hora, ciclo, modulo, f"{isg_est:.1f}", "", ("Modelo ML" if model_isg else "Formula"), ""]
+                dfs.loc[len(dfs)] = [fecha_hora, ciclo, modulo, f"{isg_est:.1f}", "", ("Modelo ML" if model_isg else "Fórmula"), ""]
             write_csv_df(csv_sulf, dfs)
 
-            # último form (comodidad de UI)
+            # último form
             data = dict(ingeniero=ingeniero, turno=turno, ciclo=ciclo, modulo=modulo,
                         tph=str(tph), hum=str(hum), agua_kgt=str(agua_kgt), agua_m3h=str(agua_m3h),
                         acid_kgt=str(acid_kgt), cut=str(cut), cus=str(cus), carb=str(carb), nitr=str(nitr),
@@ -600,12 +590,12 @@ with tabs[0]:
             path = export_rows_to_excel("historicos_humedades", list(df.columns), df.values.tolist())
             open_path_hint(path)
 
-# ----------------------------------------------- Historicos
+# ----------------------------------------------- Históricos
 with tabs[1]:
-    st.subheader("Historicos — Humedades / ISG / Perdidas")
+    st.subheader("Históricos — Humedades / ISG / Pérdidas")
     df = read_csv_df(csv_hist, HIST_HEAD, kind="hist")
     if df.empty:
-        st.info("Sin registros todavia.")
+        st.info("Sin registros todavía.")
     else:
         f1,f2,f3,f4,f5,f6 = st.columns([1,1,1,1,1,1])
         texto = f1.text_input("Texto libre", key="hist_texto")
@@ -613,7 +603,7 @@ with tabs[1]:
         desde = f3.text_input("Desde (dd/mm/aaaa)", key="hist_desde")
         hasta = f4.text_input("Hasta (dd/mm/aaaa)", key="hist_hasta")
         fciclo = f5.text_input("Ciclo", key="hist_ciclo")
-        fmod   = f6.text_input("Modulo", key="hist_modulo")
+        fmod   = f6.text_input("Módulo", key="hist_modulo")
 
         dfv = df.copy()
         if texto:
@@ -685,13 +675,13 @@ with tabs[1]:
                 write_csv_df(csv_hist, base)
                 st.success("Cambios aplicados.")
 
-        # --------- GRAFICOS MENSUALES ----------
+        # --------- GRÁFICOS MENSUALES ----------
         st.markdown("### Series temporales (vista mensual)")
         gdf = df.copy()
         gdf["__dt"] = gdf["Fecha"].apply(lambda x: csv_datetime(str(x)))
         gdf = gdf.dropna(subset=["__dt"])
         if gdf.empty:
-            st.info("No hay fechas validas para graficar.")
+            st.info("No hay fechas válidas para graficar.")
         else:
             for c in ["ISG_est%","P80_real%"]:
                 if c in gdf.columns: gdf[c] = pd.to_numeric(gdf[c], errors="coerce")
@@ -707,56 +697,56 @@ with tabs[1]:
             if yms:
                 y_sel, m_sel = yms[sel]
                 gsel = gdf[(gdf["Año"]==y_sel) & (gdf["Mes"]==m_sel)].copy()
-                gsel["Dia"] = gsel["__dt"].dt.day
+                gsel["Día"] = gsel["__dt"].dt.day
 
                 if "ISG_est%" in gsel.columns:
-                    isg_df = gsel[["Dia","Turno","ISG_est%"]].rename(columns={"ISG_est%":"Valor"})
-                    isg_df["Serie"]="ISG estimado"
+                    isg_df = gsel[["Día","Turno","ISG_est%"]].rename(columns={"ISG_est%":"Valor"})
+                    isg_df["Serie"]="ISG estimado (ML)"
                     rule = alt.Chart(pd.DataFrame({"y":[Proc.ISG_SET]})).mark_rule(strokeDash=[4,4]).encode(y="y:Q")
                     ch_isg = alt.Chart(isg_df.dropna()).mark_line(point=True).encode(
-                        x=alt.X("Dia:Q", title=f"Dia ({_N[m_sel]} {y_sel})"),
+                        x=alt.X("Día:Q", title=f"Día ({_N[m_sel]} {y_sel})"),
                         y=alt.Y("Valor:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100])),
                         color="Serie:N",
-                        tooltip=["Dia","Turno","Valor"]
+                        tooltip=["Día","Turno","Valor"]
                     )
                     st.altair_chart(rule + ch_isg, use_container_width=True)
 
                 if "P80_real%" in gsel.columns:
-                    p80_df = gsel[["Dia","Turno","P80_real%"]].rename(columns={"P80_real%":"Valor"})
+                    p80_df = gsel[["Día","Turno","P80_real%"]].rename(columns={"P80_real%":"Valor"})
                     p80_df["Serie"]="P80 real"
                     rule80 = alt.Chart(pd.DataFrame({"y":[Proc.OBJ_P80]})).mark_rule(strokeDash=[4,4]).encode(y="y:Q")
                     ch_p80 = alt.Chart(p80_df.dropna()).mark_line(point=True).encode(
-                        x=alt.X("Dia:Q", title=f"Dia ({_N[m_sel]} {y_sel})"),
+                        x=alt.X("Día:Q", title=f"Día ({_N[m_sel]} {y_sel})"),
                         y=alt.Y("Valor:Q", title="P80 (% pasante)", scale=alt.Scale(domain=[0,100])),
                         color="Serie:N",
-                        tooltip=["Dia","Turno","Valor"]
+                        tooltip=["Día","Turno","Valor"]
                     )
                     st.altair_chart(rule80 + ch_p80, use_container_width=True)
 
-# ----------------------------------------------- Termino de Modulo
+# ----------------------------------------------- Término de Módulo
 with tabs[2]:
-    st.subheader("Ingreso — Termino de Modulo")
+    st.subheader("Ingreso — Término de Módulo")
     df_hist = read_csv_df(csv_hist, HIST_HEAD, kind="hist")
 
     c1,c2,c3 = st.columns(3)
     fecha_mod = c1.text_input("Fecha y hora (dd/mm/aaaa HH:MM)", value=datetime.now().strftime("%d/%m/%Y %H:%M"), key="tm_fecha_hora")
     ciclo_m   = c2.text_input("Ciclo", key="tm_ciclo")
-    modulo_m  = c3.text_input("Modulo", key="tm_modulo")
+    modulo_m  = c3.text_input("Módulo", key="tm_modulo")
 
     c1,c2,c3 = st.columns(3)
     ton_total = c1.number_input("Tonelaje total (t)", min_value=0.0, value=0.0, key="tm_ton")
-    acido_m3  = c2.number_input("Acido total (m3)", min_value=0.0, value=0.0, key="tm_acid_m3")
-    agua_m3   = c3.number_input("Agua total (m3)", min_value=0.0, value=0.0, key="tm_agua_m3")
+    acido_m3  = c2.number_input("Ácido total (m³)", min_value=0.0, value=0.0, key="tm_acid_m3")
+    agua_m3   = c3.number_input("Agua total (m³)", min_value=0.0, value=0.0, key="tm_agua_m3")
 
     c1,c2,c3 = st.columns(3)
     p80_real_m = c1.number_input("P80 real (%)", min_value=0.0, max_value=100.0, value=0.0, key="tm_p80r")
     finos_m    = c2.number_input("Finos #100 (%)", min_value=0.0, max_value=100.0, value=0.0, key="tm_finos")
-    isg_real_m = c3.number_input("Sulfatacion real (%)", min_value=0.0, max_value=100.0, value=0.0, key="tm_isgr")
+    isg_real_m = c3.number_input("Sulfatación real (%)", min_value=0.0, max_value=100.0, value=0.0, key="tm_isgr")
     obs_m = st.text_input("Observaciones", value="", key="tm_obs")
 
     colf1, colf2 = st.columns(2)
-    btn_fetch = colf1.button("Cargar estimados desde historico", key="tm_fetch")
-    btn_save  = colf2.button("Guardar modulo", disabled=solo_lectura, key="tm_save")
+    btn_fetch = colf1.button("Cargar estimados desde histórico", key="tm_fetch")
+    btn_save  = colf2.button("Guardar módulo", disabled=solo_lectura, key="tm_save")
 
     isg_est_text = ""
     perd_text = ""
@@ -767,12 +757,12 @@ with tabs[2]:
                             (df_hist["Modulo"].astype(str).str.strip()==modulo_m.strip())]
                 if not m.empty:
                     isg_est_text = str(m.iloc[-1]["ISG_est%"])
-                    perd_text = f"Perdida (kgCu/h): {m.iloc[-1]['Perd_kgCu_h']}"
-                    st.info(f"ISG estimado modulo: {isg_est_text}% | {perd_text}")
+                    perd_text = f"Pérdida (kgCu/h): {m.iloc[-1]['Perd_kgCu_h']}"
+                    st.info(f"ISG estimado módulo: {isg_est_text}% | {perd_text}")
                 else:
-                    st.warning("No se encontro ciclo/modulo en historico.")
+                    st.warning("No se encontró ciclo/módulo en histórico.")
             else:
-                st.warning("Historico vacio.")
+                st.warning("Histórico vacío.")
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -783,18 +773,18 @@ with tabs[2]:
                f"{p80_real_m:g}", f"{finos_m:g}", perd_text, f"{isg_est_text}", f"{isg_real_m:g}", obs_m]
         dfm.loc[len(dfm)] = row
         write_csv_df(csv_mod, dfm)
-        st.success("Modulo guardado.")
+        st.success("Módulo guardado.")
 
-# ----------------------------------------------- Hist. Modulos
+# ----------------------------------------------- Hist. Módulos
 with tabs[3]:
-    st.subheader("Historico — Termino de Modulos")
+    st.subheader("Histórico — Término de Módulos")
     dfm = read_csv_df(csv_mod, MOD_HEAD, kind="mod")
     if dfm.empty:
         st.info("Sin registros.")
     else:
         c1,c2,c3,c4 = st.columns(4)
         f_ciclo = c1.text_input("Ciclo", key="hm_ciclo")
-        f_mod   = c2.text_input("Modulo", key="hm_modulo")
+        f_mod   = c2.text_input("Módulo", key="hm_modulo")
         f_desde = c3.text_input("Desde dd/mm/aaaa", key="hm_desde")
         f_hasta = c4.text_input("Hasta dd/mm/aaaa", key="hm_hasta")
 
@@ -823,9 +813,9 @@ with tabs[3]:
                 write_csv_df(csv_mod, edited)
                 st.success("Cambios aplicados.")
 
-# ----------------------------------------------- Hist. Sulfatacion
+# ----------------------------------------------- Hist. Sulfatación
 with tabs[4]:
-    st.subheader("Historico — Sulfatacion (estimada vs real)")
+    st.subheader("Histórico — Sulfatación (estimada vs real)")
     ensure_headers(csv_sulf, SULF_HEAD)
     dfs = read_csv_df(csv_sulf, SULF_HEAD, kind="sulf").copy()
 
@@ -879,7 +869,7 @@ with tabs[4]:
         dfs2["__dt"] = dfs2["FechaHora"].apply(lambda x: csv_datetime(str(x)))
         dfs2 = dfs2.dropna(subset=["__dt"])
         if dfs2.empty:
-            st.info("Aun no hay fechas validas para graficar.")
+            st.info("Aún no hay fechas válidas para graficar.")
         else:
             dfs2["Año"] = dfs2["__dt"].dt.year
             dfs2["Mes"] = dfs2["__dt"].dt.month
@@ -906,12 +896,12 @@ with tabs[4]:
                     dfm[c] = pd.to_numeric(dfm[c], errors="coerce")
 
             agg_mode = st.radio(
-                "Si hay multiples lecturas por modulo en el mes:",
-                ["Ultimo valor", "Promedio mensual"],
+                "Si hay múltiples lecturas por módulo en el mes:",
+                ["Último valor", "Promedio mensual"],
                 horizontal=True,
                 key="sulf_aggmode"
             )
-            if agg_mode == "Ultimo valor":
+            if agg_mode == "Último valor":
                 dfm = dfm.sort_values("__dt").groupby("Modulo", as_index=False).tail(1)
             else:
                 dfm = dfm.groupby("Modulo", as_index=False)[["ISG_est%", "ISG_real%"]].mean()
@@ -922,15 +912,15 @@ with tabs[4]:
                                    value_vars=["ISG_est%","ISG_real%"],
                                    var_name="Serie", value_name="ISG").dropna()
 
-            st.markdown("### ISG mensual por modulo")
+            st.markdown("### ISG mensual por módulo")
             if plot_df.empty:
-                st.info("No hay datos validos para graficar en el mes seleccionado.")
+                st.info("No hay datos válidos para graficar en el mes seleccionado.")
             else:
                 rule = alt.Chart(pd.DataFrame({"target":[Proc.ISG_SET]})).mark_rule(strokeDash=[4,4]).encode(
                     y=alt.Y("target:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100]))
                 )
                 chart = alt.Chart(plot_df).mark_circle(size=90).encode(
-                    x=alt.X("Modulo:N", title="Modulo", sort="ascending",
+                    x=alt.X("Modulo:N", title="Módulo", sort="ascending",
                             axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("ISG:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100])),
                     color=alt.Color("Serie:N", title="Serie", scale=alt.Scale(scheme="tableau10")),
@@ -942,10 +932,10 @@ with tabs[4]:
                 )
                 st.altair_chart(rule + chart + line, use_container_width=True)
 
-# ----------------------------------------------- Simulador / Optimizacion
+# ----------------------------------------------- Simulador / Optimización
 with tabs[5]:
     st.subheader("Recomendador de setpoints")
-    st.caption("Incluye CO3, NO3 y finos. Penalizacion ajustable si no hay modelo ML.")
+    st.caption("Incluye CO3, NO3 y finos. Penalización ajustable si no hay modelo ML.")
 
     c1,c2,c3,c4 = st.columns(4)
     sim_tph  = c1.number_input("TPH (t/h)", min_value=0.0, value=1900.0, key="sim_tph")
@@ -954,29 +944,27 @@ with tabs[5]:
     sim_ral  = c4.number_input("RAL (g/L)", min_value=0.0, value=0.0, key="sim_ral")
 
     c1,c2,c3,c4 = st.columns(4)
-    sim_acid_kgt = c1.number_input("Acido (kg/t)", min_value=0.0, value=11.0, key="sim_acid_kgt")
-    sim_agua_m3h = c2.number_input("Agua m3/h", min_value=0.0, value=23.0, key="sim_agua_m3h")
+    sim_acid_kgt = c1.number_input("Ácido (kg/t) (flautas)", min_value=0.0, value=11.0, key="sim_acid_kgt")
+    sim_agua_m3h = c2.number_input("Agua m³/h", min_value=0.0, value=23.0, key="sim_agua_m3h")
     sim_rpm      = c3.number_input("RPM", min_value=0.1, value=7.0, key="sim_rpm")
     sim_h        = c4.number_input("Humedad inicial (%)", min_value=0.0, max_value=100.0, value=6.0, key="sim_h")
 
     c1,c2,c3 = st.columns(3)
     sim_co3   = c1.number_input("CO3 (%)", min_value=0.0, value=0.54, key="sim_co3")
-    sim_no3   = c2.number_input("NO3 (g/L)", min_value=0.0, value=0.09, key="sim_no3")
+    sim_no3   = c2.number_input("NO3 (%)", min_value=0.0, value=0.09, key="sim_no3")
     sim_finos = c3.number_input("Finos #100 (%)", min_value=0.0, max_value=100.0, value=11.0, key="sim_finos")
 
-    with st.expander("Parametros quimicos"):
-        st.caption("Penalizacion de acido cuando **no** hay modelo ML (referenciales).")
+    with st.expander("Parámetros químicos"):
+        st.caption("Penalización de ácido cuando **no** hay modelo ML (referenciales).")
         k_co3  = st.number_input("kg/t extra por 1% CO3", min_value=0.0, value=8.0, step=0.5, key="sim_kco3")
-        k_no3  = st.number_input("kg/t extra por 1 g/L NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
+        k_no3  = st.number_input("kg/t extra por 1% NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
         k_fino = st.number_input("kg/t extra por cada punto de Finos sobre 25%", min_value=0.0, value=0.2, step=0.05, key="sim_kf")
 
-    # Sólo para humedad: volumen equivalente del ácido en kg/t
-    sim_acid_m3h_equiv = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (sim_acid_kgt>0 and sim_tph>0) else 0.0
+    sim_acid_m3h_equiv = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*100.0*10) if (sim_acid_kgt>0 and sim_tph>0) else 0.0  # sólo para humedad
     sim_hbal = humedad_balance(sim_h, sim_tph, sim_agua_m3h, sim_acid_m3h_equiv, 0.0, sim_acid_kgt)
     sim_tres = residence_time_min(sim_rpm)
 
     penalty_kgt = k_co3*sim_co3 + k_no3*sim_no3 + k_fino*max(0.0, sim_finos-25.0)
-    # *** SIN doble conteo: usa agua_m3h + sim_ral + sim_acid_kgt ***
     sim_isg_formula, need_kgph_s, avail_kgph_s, diff_kgph_s = calc_isg_formula(
         sim_cut, sim_cus, sim_tph, sim_agua_m3h, sim_ral, sim_acid_kgt, extra_kgt=penalty_kgt
     )
@@ -993,23 +981,23 @@ with tabs[5]:
             sim_isg = float(model_isg.predict([v])[0]); sim_isg = clamp(sim_isg,0,100)
             fuente = "Modelo ML"
         except Exception:
-            sim_isg = sim_isg_formula; fuente="Formula (fallback)"
+            sim_isg = sim_isg_formula; fuente="Fórmula (fallback)"
     else:
-        sim_isg = sim_isg_formula; fuente="Formula (+penalizaciones)"
+        sim_isg = sim_isg_formula; fuente="Fórmula (+penalizaciones)"
 
     st.info(
-        f"ISG por **fórmula**: **{sim_isg_formula:.1f}%** | "
+        f"ISG (ML): **{sim_isg:.1f}%** · {fuente} | "
+        f"ISG (Fórmula): **{sim_isg_formula:.1f}%** | "
         f"Requerido: {pretty_kg(need_kgph_s)} kg/h, Disponible: {pretty_kg(avail_kgph_s)} kg/h, "
-        f"Δ {pretty_kg(diff_kgph_s)} kg/h (penalizacion ≈ {penalty_kgt:.2f} kg/t)."
+        f"Δ {pretty_kg(diff_kgph_s)} kg/h (penalización ≈ {penalty_kgt:.2f} kg/t)."
     )
-    st.caption(f"ISG por **modelo ML**: **{sim_isg:.1f}%** · {fuente}")
 
-    st.markdown("#### Recomendador de acido (kg/t)")
-    if sim_tph<=0 or sim_cut<=0:
-        st.warning("Define TPH y CuT para recomendar.")
+    # Recomendación de ácido para cumplir objetivo
+    tgt_frac = Proc.ISG_SET/100.0
+    need_for_target_s = need_kgph_s*tgt_frac
+    falta_kgph = max(0.0, need_for_target_s - avail_kgph_s)
+    req_kgt_extra = falta_kgph/max(sim_tph,1e-9) if sim_tph>0 else 0.0
+    if req_kgt_extra>0:
+        st.warning(f"Para llegar a **{Proc.ISG_SET:.0f}%** estimado, agrega ≈ **{req_kgt_extra:.2f} kg/t** adicionales de H₂SO₄ (condiciones actuales).")
     else:
-        need_target = Proc.MRATIO * (sim_tph*1000*(max(sim_cus, sim_cut*0.6)/100.0))
-        vol_ral_kgph = sim_agua_m3h*sim_ral if (sim_agua_m3h>0 and sim_ral>0) else 0.0
-        req_kgt = max(0.0, (need_target + penalty_kgt*sim_tph - vol_ral_kgph)/max(sim_tph,1e-9))
-        st.success(f"Para ISG≈{Proc.ISG_SET:.0f}% el piso recomendado es **{req_kgt:.2f} kg/t** (considerando RAL y penalizaciones).")
-
+        st.success(f"Con condiciones actuales, se cumple/roza **{Proc.ISG_SET:.0f}%** sin incremento de ácido.")
