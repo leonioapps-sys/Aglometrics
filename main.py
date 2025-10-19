@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# AgloMetrics — versión web con Streamlit (sin doble conteo de ácido)
+# AgloMetrics — versión web con Streamlit
 
 # ======================= IMPORTS =======================
 import os, json, calendar, unicodedata, warnings
@@ -20,7 +20,7 @@ st.set_page_config(page_title="AgloMetrics", layout="wide")
 # ======================= CONSTANTES =======================
 class Proc:
     OBJ_P80   = 80.0
-    ISG_SET   = 50.0
+    ISG_SET   = 60.0   # <--- objetivo subido a 60%
     GAMMA     = 0.50
     RHO_W     = 1.0        # t/m3
     RHO_H2SO4 = 1.84       # t/m3
@@ -85,8 +85,10 @@ def parse_date_any(s: str)->Optional[Tuple[int,int,Optional[int]]]:
     t=t.replace('-', ' ').replace('/', ' ')
     nums=[p for p in t.split() if re.fullmatch(r'\d+',p)]
     if len(nums)>=2:
-        d,m=int(nums[0]),int(nums[1]); y=int(nums[2]) if len(nums)>=3 else None
-        if y is not None and y<100: y = y+2000 if y<=69 else y+1900
+        d,m=int(nums[0]),int(nums[1])
+        y=int(nums[2]) if len(nums)>=3 else None
+        if y is not None and y < 100:
+            y = y+2000 if y<=69 else y+1900
         return (d,m,y)
     return None
 
@@ -284,22 +286,21 @@ def load_all_models():
 
 MODELOS, MODELOS_ERR = load_all_models()
 
-# ======================= CÁLCULOS =======================
+# ======================= CALCULOS =======================
 def residence_time_min(rpm: float) -> float:
     rpm=max(0.1,rpm)
     return Proc.TRES_7RPM * (7.0 / rpm)
 
-def humedad_balance(h0, tph, agua_m3h=0.0, acido_m3h=0.0, agua_kgt=0.0, acido_kgt=0.0):
+def humedad_balance(h0,tph,agua_m3h=0.0,acido_m3h_equiv=0.0,agua_kgt=0.0,acido_kgt=0.0):
     """
-    Humedad por balance. Evita doble conteo:
-    - Considera agua_m3h (como caudal total por flautas de agua, incluya o no RAL).
-    - Considera acido_kgt (ácido por flautas de ácido).
-    - Ignora acido_m3h (dejar en 0.0 en llamadas).
+    Balance de humedad:
+      - agua_m3h: caudal de agua (m3/h)
+      - acido_m3h_equiv: SOLO el volumen equivalente de ácido de flautas (derivado de kg/t). NO incluye RAL.
+      - RAL no suma volumen adicional más allá del agua (evita doble conteo).
     """
     if tph<=0: return clamp(h0,0.0,100.0)
     agua_k = nonneg(agua_kgt) + (nonneg(agua_m3h)*Proc.RHO_W*1000)/max(tph,1e-9)
-    # acido_k: solo desde kg/t (NO sumar m3/h de ácido para no duplicar)
-    acido_k = nonneg(acido_kgt)
+    acido_k= nonneg(acido_kgt)+ (nonneg(acido_m3h_equiv)*Proc.RHO_H2SO4*1000)/max(tph,1e-9)
     return clamp(h0 + 0.1*(agua_k+acido_k), 0.0, 100.0)
 
 def evaluar_p80(p80,cu,tph):
@@ -311,23 +312,23 @@ def evaluar_p80(p80,cu,tph):
 
 def calc_isg_formula(cu, cu_sol, tph, agua_m3h, acid_gpl, acido_kgt, extra_kgt=0.0):
     """
-    Ácido disponible:
-      - Desde flautas de ácido: tph * acido_kgt  (kg/h)
-      - Desde RAL: si acid_gpl>0, agua_m3h * acid_gpl  (kg/h, g/L ≈ kg/m3)
-    SIN fallback de tratar caudal como ácido puro.
+    ISG por balance estequiométrico (en %):
+      - Aporte 1: ácido en flautas -> tph * acido_kgt  (kg/h)
+      - Aporte 2: RAL en el agua  -> agua_m3h * acid_gpl (kg/h)
+      - 'extra_kgt' captura penalizaciones (CO3, NO3, finos, etc.) en kg/t adicionales.
     """
-    cu_use   = cu_sol if cu_sol>0 else cu
-    cu_kg_h  = tph*1000*(cu_use/100.0)
-    need     = Proc.MRATIO*cu_kg_h + max(0.0, extra_kgt)*max(tph,0.0)
+    cu_use = cu_sol if cu_sol>0 else cu
+    cu_kg_h = tph*1000*(cu_use/100.0)
+    need = Proc.MRATIO*cu_kg_h + max(0.0, extra_kgt)*max(tph,0.0)
 
     avail_kgph = 0.0
-    if acido_kgt>0:
+    if acido_kgt>0:                  # ácido dosificado en flautas (kg/t)
         avail_kgph += tph*acido_kgt
-    if acid_gpl>0 and agua_m3h>0:
+    if agua_m3h>0 and acid_gpl>0:    # RAL aportado por el agua (g/L ~ kg/m3)
         avail_kgph += agua_m3h*acid_gpl
 
-    grado = 0.0 if need<=0 else avail_kgph/max(need,1e-9)
-    return clamp(grado*100.0, 0.0, 100.0), need, avail_kgph, (avail_kgph-need)
+    grado = 0.0 if need<=0 else avail_kgph/need
+    return max(0.0,min(1.0,grado))*100.0, need, avail_kgph, (avail_kgph-need)
 
 def finos_flag(f):
     if f is None: return "—"
@@ -349,22 +350,12 @@ if "isg_rf" in MODELOS:
     model_isg, isg_feats, isg_meta = MODELOS["isg_rf"]
 if "p80_model" in MODELOS:
     model_p80, p80_feats, p80_meta = MODELOS["p80_model"]
-    
+
 col_m1, col_m2 = st.sidebar.columns(2)
-
 with col_m1:
-    if model_isg:
-        st.success("Modelo ISG cargado")
-    else:
-        st.warning("ISG no cargado")
-
+    st.success("Modelo ISG cargado") if model_isg else st.warning("ISG no cargado")
 with col_m2:
-    if model_p80:
-        st.success("Modelo P80 cargado")
-    else:
-        st.warning("P80 no cargado")
-
-
+    st.success("Modelo P80 cargado") if model_p80 else st.warning("P80 no cargado")
 
 if MODELOS_ERR:
     st.sidebar.markdown("**Detalles de modelos no cargados:**")
@@ -444,8 +435,9 @@ with tabs[0]:
         if cus>cut: errs.append("Cu soluble no puede exceder CuT.")
         for msg in errs: st.warning("⚠️ "+msg)
 
-        # Humedad: agua_m3h + ácido kg/t (sin sumar flujo de ácido en m3/h para evitar doble conteo)
-        h_bal = humedad_balance(hum, tph, agua_m3h, 0.0, agua_kgt, acid_kgt)
+        # Volumen equivalente de ácido desde kg/t (SOLO para humedad)
+        acid_m3h_equiv = (tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (acid_kgt>0 and tph>0) else 0.0
+        h_bal = humedad_balance(hum, tph, agua_m3h, acid_m3h_equiv, agua_kgt, acid_kgt)
         st.info(f"**Humedad por balance:** {h_bal:.2f}% — Objetivo 10–12% → " + ("OK" if 10.0<=h_bal<=12.0 else "Fuera de rango"))
 
         estado_p80, kg_cu_h = evaluar_p80(p80, cut, tph)
@@ -460,15 +452,18 @@ with tabs[0]:
         pct = (delta/can_mina*100.0) if can_mina>0 else 0.0
         st.write(f"Acido flauta: {acid_kgt:.2f} | CAN mina: {can_mina:.2f} | Δ {delta:+.2f} kg/t ({pct:+.1f}%)")
 
-        # ISG (modelo o fórmula): ácido disponible = flautas (kg/t) + RAL (agua_m3h * g/L)
+        # ---- ISG (modelo o formula) ----
         agua_kgt_full = agua_kgt + (agua_m3h*Proc.RHO_W*1000.0/max(tph,1e-9) if tph>0 else 0.0)
         t_res = residence_time_min(rpm)
 
+        # *** SIN doble conteo ***
+        # Para estequiometría: usar agua_m3h (no el equivalente desde kg/t) + acid_gpl + acid_kgt.
         isg_formula, need_kgph, avail_kgph, diff_kgph = calc_isg_formula(
             cut, cus, tph, agua_m3h, acid_gpl, acid_kgt
         )
         diff_kgt = diff_kgph / max(tph, 1e-9) if tph>0 else 0.0
 
+        # ML
         feature_map = {
             "humedad_balance": h_bal, "hum%": h_bal,
             "cut%": cut, "cut": cut,
@@ -495,12 +490,41 @@ with tabs[0]:
         else:
             isg_est = isg_formula; fuente = "Formula"
 
-        st.success(f"Sulfatacion estimada (ISG): **{isg_est:.1f}%** · {fuente}")
+        # Mostrar ambos resultados
+        st.success(f"ISG por **fórmula**: **{isg_formula:.1f}%** · (Disponible {pretty_kg(avail_kgph)} / Requerido {pretty_kg(need_kgph)} kg/h)")
+        st.info(   f"ISG por **modelo ML**: **{isg_est:.1f}%** · {fuente}")
 
-        if isg_est >= Proc.ISG_SET:
-            st.success(f"✅ ISG cumple objetivo ({Proc.ISG_SET:.0f}%). Acido disp. **{pretty_kg(avail_kgph)}** kg/h, req. **{pretty_kg(need_kgph)}** kg/h (Δ {pretty_kg(diff_kgph)} kg/h, {diff_kgt:+.2f} kg/t).")
+        # Estado respecto al objetivo
+        if isg_formula >= Proc.ISG_SET:
+            st.success(f"✅ Fórmula ≥ objetivo ({Proc.ISG_SET:.0f}%). Δ {pretty_kg(diff_kgph)} kg/h ({diff_kgt:+.2f} kg/t).")
         else:
-            st.warning(f"⚠️ ISG bajo objetivo ({Proc.ISG_SET:.0f}%). Faltan ≈ **{pretty_kg(-diff_kgph)} kg/h** de H2SO4 (≈ {abs(diff_kgt):.2f} kg/t).")
+            st.error(f"⚠️ Fórmula < objetivo ({Proc.ISG_SET:.0f}%). Faltan ≈ **{pretty_kg(-diff_kgph)} kg/h** (≈ {abs(diff_kgt):.2f} kg/t).")
+
+        # === Corrección sugerida hacia el objetivo (basada en estequiometría) ===
+        T = Proc.ISG_SET / 100.0
+        avail_req_for_target = need_kgph * T
+        extra_kgph = max(0.0, avail_req_for_target - avail_kgph)    # ácido adicional requerido (kg/h)
+        ahorro_kgph = max(0.0, avail_kgph - avail_req_for_target)   # excedente (kg/h)
+
+        delta_kgt = (extra_kgph / max(tph, 1e-9))                   # subir flautas (kg/t)
+        delta_ral = (extra_kgph / max(agua_m3h, 1e-9)) if agua_m3h>0 else np.nan  # alternativa por RAL (g/L)
+
+        st.markdown("### Corrección sugerida hacia el objetivo")
+        if extra_kgph > 0:
+            st.error(
+                f"Falta ácido para llegar a **{Proc.ISG_SET:.0f}%**:\n\n"
+                f"- **Añadir** ≈ **{pretty_kg(extra_kgph)} kg/h** de H₂SO₄\n"
+                f"- Equivalente a **+{delta_kgt:.2f} kg/t** en flautas de ácido"
+                + (f"\n- **Alternativa:** **+{delta_ral:.1f} g/L** en RAL (con el caudal de agua actual)" if np.isfinite(delta_ral) else "")
+            )
+        else:
+            st.success(
+                f"Tienes excedente respecto a **{Proc.ISG_SET:.0f}%**:\n\n"
+                f"- **Podrías reducir** ≈ **{pretty_kg(ahorro_kgph)} kg/h** de H₂SO₄\n"
+                f"- Equivalente a **-{(ahorro_kgph/max(tph,1e-9)):.2f} kg/t**"
+                + (f"\n- **Alternativa:** **-{(ahorro_kgph/max(agua_m3h,1e-9)):.1f} g/L** en RAL" if agua_m3h>0 else "")
+            )
+        st.caption("Nota: La pauta usa balance estequiométrico (física del proceso). El ML es referencia predictiva adicional.")
 
         # ---------- Guardar ----------
         if guardar and not solo_lectura:
@@ -516,9 +540,6 @@ with tabs[0]:
                 except Exception:
                     p80_est = Proc.OBJ_P80
 
-            # Solo referencia de conversión: m3/h equivalentes desde kg/t (no usado en cálculos)
-            acido_m3_h_calc = (tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (acid_kgt>0 and tph>0) else 0.0
-
             row = {
                 "Fecha": fecha_ui,
                 "Ingeniero": ingeniero, "Turno": turno, "Ciclo": ciclo, "Modulo": modulo,
@@ -527,7 +548,7 @@ with tabs[0]:
                 "Origen": origen, "RAL": f"{acid_gpl:g}",
                 "P80_real%": f"{p80:.1f}", "P25%": f"{p25:.1f}", "Finos_100#_%": f"{finos:.1f}",
                 "Ton_turno_t": f"{turno_t:g}", "RPM": f"{rpm:g}",
-                "Acido_m3_h_calc": f"{acido_m3_h_calc:.3f}",
+                "Acido_m3_h_calc": f"{acid_m3h_equiv:.3f}",  # sólo referencia de humedad
                 "P80_est%": f"{p80_est:.1f}", "ISG_est%": f"{isg_est:.1f}",
                 "Perd_kgCu_h": f"{kg_cu_h:.0f}", "Perd_turno_kg": f"{perd_turno:.0f}", "Perd_dia_kg": f"{perd_dia:.0f}",
             }
@@ -949,11 +970,13 @@ with tabs[5]:
         k_no3  = st.number_input("kg/t extra por 1 g/L NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
         k_fino = st.number_input("kg/t extra por cada punto de Finos sobre 25%", min_value=0.0, value=0.2, step=0.05, key="sim_kf")
 
-    # Humedad simulada: agua_m3h + ácido kg/t (sin flujos de ácido en m3/h)
-    sim_hbal = humedad_balance(sim_h, sim_tph, sim_agua_m3h, 0.0, 0.0, sim_acid_kgt)
+    # Sólo para humedad: volumen equivalente del ácido en kg/t
+    sim_acid_m3h_equiv = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (sim_acid_kgt>0 and sim_tph>0) else 0.0
+    sim_hbal = humedad_balance(sim_h, sim_tph, sim_agua_m3h, sim_acid_m3h_equiv, 0.0, sim_acid_kgt)
     sim_tres = residence_time_min(sim_rpm)
 
     penalty_kgt = k_co3*sim_co3 + k_no3*sim_no3 + k_fino*max(0.0, sim_finos-25.0)
+    # *** SIN doble conteo: usa agua_m3h + sim_ral + sim_acid_kgt ***
     sim_isg_formula, need_kgph_s, avail_kgph_s, diff_kgph_s = calc_isg_formula(
         sim_cut, sim_cus, sim_tph, sim_agua_m3h, sim_ral, sim_acid_kgt, extra_kgt=penalty_kgt
     )
@@ -975,19 +998,18 @@ with tabs[5]:
         sim_isg = sim_isg_formula; fuente="Formula (+penalizaciones)"
 
     st.info(
-        f"ISG simulado: **{sim_isg:.1f}%** · {fuente} | "
+        f"ISG por **fórmula**: **{sim_isg_formula:.1f}%** | "
         f"Requerido: {pretty_kg(need_kgph_s)} kg/h, Disponible: {pretty_kg(avail_kgph_s)} kg/h, "
         f"Δ {pretty_kg(diff_kgph_s)} kg/h (penalizacion ≈ {penalty_kgt:.2f} kg/t)."
     )
+    st.caption(f"ISG por **modelo ML**: **{sim_isg:.1f}%** · {fuente}")
 
     st.markdown("#### Recomendador de acido (kg/t)")
     if sim_tph<=0 or sim_cut<=0:
         st.warning("Define TPH y CuT para recomendar.")
     else:
         need_target = Proc.MRATIO * (sim_tph*1000*(max(sim_cus, sim_cut*0.6)/100.0))
-        # Ácido aportado por RAL (si hay): agua_m3h * g/L
-        vol_kgph = sim_agua_m3h*sim_ral if (sim_agua_m3h>0 and sim_ral>0) else 0.0
-        req_kgt = max(0.0, (need_target + penalty_kgt*sim_tph - vol_kgph)/max(sim_tph,1e-9))
-        st.success(f"Para ISG≈{Proc.ISG_SET:.0f}% el piso recomendado es **{req_kgt:.2f} kg/t** (con RAL y penalizaciones actuales).")
-
+        vol_ral_kgph = sim_agua_m3h*sim_ral if (sim_agua_m3h>0 and sim_ral>0) else 0.0
+        req_kgt = max(0.0, (need_target + penalty_kgt*sim_tph - vol_ral_kgph)/max(sim_tph,1e-9))
+        st.success(f"Para ISG≈{Proc.ISG_SET:.0f}% el piso recomendado es **{req_kgt:.2f} kg/t** (considerando RAL y penalizaciones).")
 
