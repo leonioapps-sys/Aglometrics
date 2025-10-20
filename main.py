@@ -325,7 +325,7 @@ def calc_isg_formula(cu,cu_sol,tph,agua_m3h,acid_gpl,acido_kgt, extra_kgt=0.0):
 
 def finos_flag(f):
     if f is None: return "—"
-    return "Rojo" if f>20 else ("Ámbar" if f>=15 else "OK")
+    return "Rojo" if f>30 else ("Ámbar" if f>=25 else "OK")
 
 # ======================= UI =======================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
