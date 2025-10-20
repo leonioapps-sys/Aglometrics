@@ -329,7 +329,7 @@ def calc_isg_formula(cu,cu_sol,tph,agua_m3h,acid_gpl,acido_kgt, extra_kgt=0.0):
 
 def finos_flag(f):
     if f is None: return "—"
-    return "Rojo" if f>30 else ("Peligro para la formación de glomeros" if f>=25 else "OK")
+    return "Evalua cambio de alimentación" if f>20 else ("Peligro para la formación de glomeros" if f>=15 else "OK")
 
 # ======================= UI =======================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
@@ -482,7 +482,7 @@ with tabs[0]:
         # Mostrar ambos resultados
         cA, cB = st.columns(2)
         cA.success(f"ISG estimado (ML): **{isg_est:.1f}%** · {fuente}")
-        cB.info(   f"ISG (Fórmula): **{isg_formula:.1f}%** · (usa RAL en ácido disponible)")
+        cB.info(   f"ISG (Fórmula): **{isg_formula:.1f}%** · (use RAL si dispone)")
 
         # Comparación contra objetivo (mensajes diferenciados)
         ml_ok   = isg_est     >= Proc.ISG_SET
