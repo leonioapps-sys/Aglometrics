@@ -24,6 +24,10 @@ class Proc:
     RHO_H2SO4 = 1.84          # t/m3
     MRATIO    = 98.0/63.55    # kg H2SO4 / kg Cu
     TRES_7RPM = 0.80          # min a 7 rpm
+    # Umbrales de finos (%)
+    FINOS_RED   = 20.0   # Rojo si > 20
+    FINOS_AMBER = 15.0   # Ámbar si >= 15 y <= 20
+
 
 HIST_HEAD = [
     "Fecha","Ingeniero","Turno","Ciclo","Modulo",
@@ -325,7 +329,7 @@ def calc_isg_formula(cu,cu_sol,tph,agua_m3h,acid_gpl,acido_kgt, extra_kgt=0.0):
 
 def finos_flag(f):
     if f is None: return "—"
-    return "Rojo" if f>30 else ("Ámbar" if f>=25 else "OK")
+    return "Rojo" if f> FINOS_RED else ("Ámbar" if f>= FINOS_AMBER else "OK")
 
 # ======================= UI =======================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
