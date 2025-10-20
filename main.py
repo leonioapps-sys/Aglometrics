@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
-# AgloMetrics — versión web con Streamlit (parches 17/10)
+# AgloMetrics — versión web con Streamlit (parches “ISG ML vs Fórmula”, objetivo 60%, sin doble conteo de ácido)
 
-# ======================= IMPORTS =======================
 import os, json, calendar, unicodedata, warnings
 from datetime import datetime, date
 from typing import Optional, Tuple, Any, List
@@ -14,18 +13,17 @@ import joblib
 import sklearn
 import streamlit as st
 
-# ---------------------------- CONFIG STREAMLIT (DEBE SER EL PRIMER COMANDO DE STREAMLIT) ----------------------------
 st.set_page_config(page_title="AgloMetrics", layout="wide")
 
 # ======================= CONSTANTES =======================
 class Proc:
     OBJ_P80   = 80.0
-    ISG_SET   = 60.0          # <— objetivo subido a 60%
+    ISG_SET   = 60.0          # objetivo de sulfatación
     GAMMA     = 0.50
     RHO_W     = 1.0           # t/m3
     RHO_H2SO4 = 1.84          # t/m3
     MRATIO    = 98.0/63.55    # kg H2SO4 / kg Cu
-    TRES_7RPM = 0.80          # min a 7 rpm (ajustable)
+    TRES_7RPM = 0.80          # min a 7 rpm
 
 HIST_HEAD = [
     "Fecha","Ingeniero","Turno","Ciclo","Modulo",
@@ -33,12 +31,12 @@ HIST_HEAD = [
     "CuT%","CuS%","CO3%","NO3%","CAN_mina_kg_t",
     "Origen","RAL","P80_real%","P25%","Finos_100#_%",
     "Ton_turno_t","RPM",
-    "Acido_m3_h_calc","P80_est%","ISG_est%","ISG_formula%",   # <- suma columna opcional para fórmula
+    "Acido_m3_h_calc","P80_est%","ISG_est%","ISG_formula%",
     "Perd_kgCu_h","Perd_turno_kg","Perd_dia_kg"
 ]
 
-MOD_HEAD = ["FechaHora","Ciclo","Modulo","Ton_total_t","Acido_m3","Agua_m3",
-            "P80_real%","Finos_100#_%","Perdida_Cu_texto","ISG_est_mod%","ISG_real%","Observaciones"]
+MOD_HEAD  = ["FechaHora","Ciclo","Modulo","Ton_total_t","Acido_m3","Agua_m3",
+             "P80_real%","Finos_100#_%","Perdida_Cu_texto","ISG_est_mod%","ISG_real%","Observaciones"]
 
 SULF_HEAD = ["FechaHora","Ciclo","Modulo","ISG_est%","ISG_real%","Fuente","Observaciones"]
 
@@ -49,7 +47,6 @@ MONTHS = {"enero":1,"ene":1,"febrero":2,"feb":2,"marzo":3,"mar":3,"abril":4,"abr
 
 # ======================= UTILIDADES =======================
 def export_dir() -> str:
-    # En Streamlit Cloud, el cwd es escribible durante la sesión
     return os.path.abspath(os.getcwd())
 
 def clamp(x,a,b): return max(a,min(b,x))
@@ -122,7 +119,7 @@ def normalize_hist_columns(df: pd.DataFrame) -> pd.DataFrame:
         "p80 est%":"P80_est%","isg est%":"ISG_est%","isg formula%":"ISG_formula%",
         "perd kgcu/h":"Perd_kgCu_h","perd turno kg":"Perd_turno_kg","perd dia kg":"Perd_dia_kg"
     }
-    new = {}
+    new={}
     for c in df.columns:
         key = strip_accents(str(c)).lower().strip()
         tgt = mapping.get(key)
@@ -246,7 +243,6 @@ def load_model_safely(path: str | Path):
             if p.suffix == ".skops":
                 if not _HAS_SKOPS:
                     raise ImportError("skops no instalado (agrega 'skops' a requirements.txt).")
-                # Algunas versiones antiguas no aceptan 'trusted' al guardar, pero sí al cargar
                 try:
                     obj = skio.load(p, trusted=True)
                 except TypeError:
@@ -260,7 +256,6 @@ def load_model_safely(path: str | Path):
 
 @st.cache_resource(show_spinner=False)
 def load_all_models():
-    """Busca p80_model e isg_rf en /models y en la raíz; prioriza .skops sobre .pkl."""
     base = Path(__file__).parent
     models_dir = base / "models"
 
@@ -297,8 +292,9 @@ def residence_time_min(rpm: float) -> float:
 
 def humedad_balance(h0,tph,agua_m3h=0.0,acido_m3h_equiv=0.0,agua_kgt=0.0,acido_kgt=0.0):
     """
-    - Sólo se considera el ácido de flautas (kg/t) convertido a m3/h como 'acido_m3h_equiv'.
-    - NO se usa RAL (g/L) en el balance de humedad (evita doble conteo).
+    Balance de humedad que evita doble conteo:
+      - Solo usa ácido de flautas (kg/t) convertido a m3/h como 'acido_m3h_equiv'.
+      - El RAL (g/L) NO entra en la humedad.
     """
     if tph<=0: return clamp(h0,0.0,100.0)
     agua_k = nonneg(agua_kgt) + (nonneg(agua_m3h)*Proc.RHO_W*1000)/max(tph,1e-9)
@@ -314,9 +310,9 @@ def evaluar_p80(p80,cu,tph):
 
 def calc_isg_formula(cu,cu_sol,tph,agua_m3h,acid_gpl,acido_kgt, extra_kgt=0.0):
     """
-    ISG(fórmula) = min(1, max(0, ácido_disponible / ácido_requerido)) * 100
-    - ácido_disponible (kg/h) = tph*acido_kgt + agua_m3h*acid_gpl
-    - ácido_requerido (kg/h)  = MRATIO * (tph*1000*Cu_util) + extra_kgt*tph
+    ISG(Fórmula) = min(1, max(0, ácido_disponible / ácido_requerido)) * 100
+      ácido_disp (kg/h) = tph*acido_kgt + agua_m3h*acid_gpl
+      ácido_req  (kg/h) = MRATIO*(tph*1000*Cu_util) + extra_kgt*tph
     """
     cu_use = cu_sol if cu_sol>0 else cu
     cu_kg_h = tph*1000*(cu_use/100.0)
@@ -331,7 +327,7 @@ def finos_flag(f):
     if f is None: return "—"
     return "Rojo" if f>30 else ("Ámbar" if f>=25 else "OK")
 
-# ======================= SIDEBAR =======================
+# ======================= UI =======================
 if os.path.exists("AgloMetrics_P80_icon_512.png"):
     st.sidebar.image("AgloMetrics_P80_icon_512.png", width=240)
 
@@ -340,7 +336,6 @@ st.sidebar.subheader("Optimización aglomerado con ML")
 solo_lectura = st.sidebar.toggle("🔒 Modo Solo Lectura", value=False,
                                  help="Bloquea escritura en CSV y ediciones.")
 
-# === Estado de modelos en la sidebar (sin condicionales inline) ===
 model_isg  = None; isg_feats=None; isg_meta={}
 model_p80  = None; p80_feats=None; p80_meta={}
 if "isg_rf" in MODELOS:
@@ -349,24 +344,15 @@ if "p80_model" in MODELOS:
     model_p80, p80_feats, p80_meta = MODELOS["p80_model"]
 
 col_m1, col_m2 = st.sidebar.columns(2)
-
 with col_m1:
-    if model_isg is not None:
-        st.success("Modelo ISG cargado")
-    else:
-        st.warning(f"ISG no cargado: {MODELOS_ERR.get('isg_rf','(archivo no encontrado)')}")
-
+    if model_isg is not None: st.success("Modelo ISG cargado")
+    else: st.warning(f"ISG no cargado: {MODELOS_ERR.get('isg_rf','(archivo no encontrado)')}")
 with col_m2:
-    if model_p80 is not None:
-        st.success("Modelo P80 cargado")
-    else:
-        st.warning(f"P80 no cargado: {MODELOS_ERR.get('p80_model','(archivo no encontrado)')}")
+    if model_p80 is not None: st.success("Modelo P80 cargado")
+    else: st.warning(f"P80 no cargado: {MODELOS_ERR.get('p80_model','(archivo no encontrado)')}")
 
-
-# ======================= RUTAS CSV =======================
 csv_hist, csv_mod, csv_sulf, last_form = csv_paths()
 
-# ======================= TABS =======================
 tabs = st.tabs([
     "Ingreso", "Históricos", "Término Módulo",
     "Hist. Módulos", "Hist. Sulfatación", "Simulador / Optimización"
@@ -436,10 +422,10 @@ with tabs[0]:
         if cus>cut: errs.append("Cu soluble no puede exceder CuT.")
         for msg in errs: st.warning("⚠️ "+msg)
 
-        # Ácido de flautas (kg/t) → m3/h equivalente (SÓLO para humedad)
+        # Ácido flautas (kg/t) → m3/h equivalente SOLO para humedad
         acid_m3h_equiv = (tph*acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (acid_kgt>0 and tph>0) else 0.0
 
-        # Humedad (evita doble conteo: NO usa RAL)
+        # Humedad sin doble conteo (NO usa RAL)
         h_bal = humedad_balance(hum, tph, agua_m3h, acid_m3h_equiv, agua_kgt, acid_kgt)
         st.info(f"**Humedad por balance:** {h_bal:.2f}% — Objetivo 10–12% → " + ("OK" if 10.0<=h_bal<=12.0 else "Fuera de rango"))
 
@@ -494,24 +480,36 @@ with tabs[0]:
         cA.success(f"ISG estimado (ML): **{isg_est:.1f}%** · {fuente}")
         cB.info(   f"ISG (Fórmula): **{isg_formula:.1f}%** · (usa RAL en ácido disponible)")
 
-        # Chequeo contra objetivo y pauta de corrección (kg/t)
+        # Comparación contra objetivo (mensajes diferenciados)
+        ml_ok   = isg_est     >= Proc.ISG_SET
+        frm_ok  = isg_formula >= Proc.ISG_SET
         target_frac = Proc.ISG_SET/100.0
         need_for_target = need_kgph*target_frac
         delta_target_kgph = need_for_target - avail_kgph
-        delta_target_kgt = delta_target_kgph/max(tph,1e-9) if tph>0 else 0.0
+        delta_target_kgt  = delta_target_kgph/max(tph,1e-9) if tph>0 else 0.0
 
-        if isg_est >= Proc.ISG_SET or isg_formula >= Proc.ISG_SET:
+        if ml_ok and frm_ok:
             st.success(
-                f"✅ ISG cumple/roza objetivo ({Proc.ISG_SET:.0f}%). "
-                f"Ácido disp. **{pretty_kg(avail_kgph)}** kg/h, req. **{pretty_kg(need_kgph)}** kg/h "
-                f"(Δ {pretty_kg(diff_kgph)} kg/h, {diff_kgt:+.2f} kg/t)."
+                f"✅ ML y Fórmula ≥ {Proc.ISG_SET:.0f}%. Ácido disp. **{pretty_kg(avail_kgph)}** kg/h, "
+                f"req. **{pretty_kg(need_kgph)}** kg/h (Δ {pretty_kg(diff_kgph)} kg/h, {diff_kgt:+.2f} kg/t)."
+            )
+        elif (not ml_ok) and frm_ok:
+            st.warning(
+                f"⚠️ ML estima **{isg_est:.1f}%** (< {Proc.ISG_SET:.0f}%), pero la Fórmula indica que con el ácido disponible "
+                f"se podría alcanzar (ISG Fórmula **{isg_formula:.1f}%**). Revisa variables de proceso (P80, finos, rpm, humedad). "
+                f"Para asegurar el objetivo, margen adicional hasta objetivo: ≈ {max(0.0,delta_target_kgt):.2f} kg/t."
+            )
+        elif ml_ok and (not frm_ok):
+            st.warning(
+                f"⚠️ ML estima **{isg_est:.1f}%** (≥ {Proc.ISG_SET:.0f}%), pero la estequiometría indica falta de ácido "
+                f"(ISG Fórmula **{isg_formula:.1f}%**). Faltan ≈ **{pretty_kg(max(0.0,-diff_kgph))} kg/h** "
+                f"(≈ {max(0.0, -diff_kgt):.2f} kg/t) para llegar a objetivo químico."
             )
         else:
             st.warning(
-                f"⚠️ ISG bajo objetivo ({Proc.ISG_SET:.0f}%). "
-                f"Faltan ≈ **{pretty_kg(max(0.0, -diff_kgph))} kg/h** de H₂SO₄ respecto a ‘necesario’, "
-                f"y para llegar a objetivo: **{pretty_kg(max(0.0, delta_target_kgph))} kg/h** "
-                f"(≈ {max(0.0,delta_target_kgt):.2f} kg/t adicionales)."
+                f"⚠️ ML **{isg_est:.1f}%** y Fórmula **{isg_formula:.1f}%** están bajo {Proc.ISG_SET:.0f}%. "
+                f"Faltan ≈ **{pretty_kg(max(0.0, -diff_kgph))} kg/h** de H₂SO₄ respecto a ‘necesario’, y para llegar a objetivo: "
+                f"**{pretty_kg(max(0.0, delta_target_kgph))} kg/h** (≈ {max(0.0,delta_target_kgt):.2f} kg/t)."
             )
 
         # ---------- Guardar ----------
@@ -549,7 +547,6 @@ with tabs[0]:
             df.loc[len(df)] = [row[c] for c in HIST_HEAD]
             write_csv_df(csv_hist, df)
 
-            # Sulfatación estimada (sincroniza por ciclo si no hay real)
             ensure_headers(csv_sulf, SULF_HEAD)
             dfs = read_csv_df(csv_sulf, SULF_HEAD, kind="sulf")
             idx_to_update = None
@@ -569,7 +566,6 @@ with tabs[0]:
                 dfs.loc[len(dfs)] = [fecha_hora, ciclo, modulo, f"{isg_est:.1f}", "", ("Modelo ML" if model_isg else "Fórmula"), ""]
             write_csv_df(csv_sulf, dfs)
 
-            # último form
             data = dict(ingeniero=ingeniero, turno=turno, ciclo=ciclo, modulo=modulo,
                         tph=str(tph), hum=str(hum), agua_kgt=str(agua_kgt), agua_m3h=str(agua_m3h),
                         acid_kgt=str(acid_kgt), cut=str(cut), cus=str(cus), carb=str(carb), nitr=str(nitr),
@@ -848,7 +844,7 @@ with tabs[4]:
 
         c1, c2 = st.columns(2)
         b_exp   = c1.button("Exportar Excel", key="hs_export")
-        b_apply = c2.button("Aplicar cambios al CSV", disabled=solo_lectura, key="hs_apply")
+        b_apply = c2.button("Aplicar cambios al CSV", key="hs_apply", disabled=solo_lectura)
 
         if b_exp:
             path = export_rows_to_excel("historicos_sulfatacion", list(edited.columns), edited.values.tolist())
@@ -920,8 +916,7 @@ with tabs[4]:
                     y=alt.Y("target:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100]))
                 )
                 chart = alt.Chart(plot_df).mark_circle(size=90).encode(
-                    x=alt.X("Modulo:N", title="Módulo", sort="ascending",
-                            axis=alt.Axis(labelAngle=0)),
+                    x=alt.X("Modulo:N", title="Módulo", sort="ascending", axis=alt.Axis(labelAngle=0)),
                     y=alt.Y("ISG:Q", title="ISG (%)", scale=alt.Scale(domain=[0,100])),
                     color=alt.Color("Serie:N", title="Serie", scale=alt.Scale(scheme="tableau10")),
                     tooltip=["Modulo","Serie","ISG"]
@@ -960,7 +955,8 @@ with tabs[5]:
         k_no3  = st.number_input("kg/t extra por 1% NO3", min_value=0.0, value=0.6, step=0.1, key="sim_kno3")
         k_fino = st.number_input("kg/t extra por cada punto de Finos sobre 25%", min_value=0.0, value=0.2, step=0.05, key="sim_kf")
 
-    sim_acid_m3h_equiv = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*100.0*10) if (sim_acid_kgt>0 and sim_tph>0) else 0.0  # sólo para humedad
+    # ácido flautas → m3/h SOLO para humedad
+    sim_acid_m3h_equiv = (sim_tph*sim_acid_kgt)/(Proc.RHO_H2SO4*1000.0) if (sim_acid_kgt>0 and sim_tph>0) else 0.0
     sim_hbal = humedad_balance(sim_h, sim_tph, sim_agua_m3h, sim_acid_m3h_equiv, 0.0, sim_acid_kgt)
     sim_tres = residence_time_min(sim_rpm)
 
@@ -992,7 +988,6 @@ with tabs[5]:
         f"Δ {pretty_kg(diff_kgph_s)} kg/h (penalización ≈ {penalty_kgt:.2f} kg/t)."
     )
 
-    # Recomendación de ácido para cumplir objetivo
     tgt_frac = Proc.ISG_SET/100.0
     need_for_target_s = need_kgph_s*tgt_frac
     falta_kgph = max(0.0, need_for_target_s - avail_kgph_s)
@@ -1001,3 +996,4 @@ with tabs[5]:
         st.warning(f"Para llegar a **{Proc.ISG_SET:.0f}%** estimado, agrega ≈ **{req_kgt_extra:.2f} kg/t** adicionales de H₂SO₄ (condiciones actuales).")
     else:
         st.success(f"Con condiciones actuales, se cumple/roza **{Proc.ISG_SET:.0f}%** sin incremento de ácido.")
+
